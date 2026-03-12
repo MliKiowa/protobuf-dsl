@@ -4,22 +4,21 @@
 
 无 `.proto` 文件。无运行时库。无函数调用开销。只需 TypeScript 接口 → 确定化的二进制编解码代码。
 
-## ✨ 特性
+## 特性
 
 - **零运行时** — 所有 wire-format 逻辑在编译时内联
 - **TypeScript 原生** — 用 `pb<N, Type>` 标记接口字段即可定义 schema
 - **泛型单态化** — `Wrapper<Wrapper<string>>` → 自动生成具体编解码函数
 - **重复字段** — `pb_repeated<N, Type>` 编译为 `Type[]`
 - **编译期预计算 Tag** — 字段标签在编译时折叠为字面量字节
-- **单遍编译** — 1 次解析 + 1 次 AST 遍历，零冗余
 
-## 📦 安装
+## 安装
 
 ```bash
 npm install protobuf-dsl
 ```
 
-## 🚀 快速开始
+## 快速开始
 
 **1. 在 `vite.config.ts` 中添加插件：**
 
@@ -74,7 +73,7 @@ const bytes = protobuf_encode_UserProfile({ id: 42, ... });
 const user = protobuf_decode_UserProfile(bytes);
 ```
 
-## 🧬 泛型单态化
+## 泛型单态化
 
 定义泛型 protobuf 模板，使用具体类型实例化：
 
@@ -90,7 +89,7 @@ const data = protobuf_encode<Wrapper<Wrapper<string>>>({
 });
 ```
 
-## 📐 支持的类型
+## 支持的类型
 
 | Protobuf 类型 | TypeScript 类型 | Wire 类型 |
 |---------------|-----------------|-----------|
@@ -139,43 +138,8 @@ const data = protobuf_encode<Wrapper<Wrapper<string>>>({
 | `{ inner: { value: 999 } }` | **5 B** | 23 B |
 
 **核心结论：**
-- 🟢 **解码速度比 protobufjs 快 2–16 倍**，比 JSON.parse 快 3–16 倍 — 完全内联代码的核心优势
-- 🟡 编码速度与 protobufjs 处于同一量级（protobufjs 使用了预分配 Writer 缓冲区优化）
-- 🟢 **wire 体积比 JSON 小 2–5 倍**
-
-## 🏗️ 工作原理
-
-```
-源代码                         构建时                           输出
-┌─────────────┐    ┌──────────────────────────┐    ┌──────────────────────┐
-│ interface +  │    │ 1. 解析源码（1 次）       │    │ 完全内联的            │
-│ pb<N, Type>  │───▶│ 2. 遍历 AST（1 次）      │───▶│ 编解码函数            │
-│ + encode()   │    │ 3. 生成内联代码          │    │ 预计算的 tag 字面量    │
-│   调用       │    │ 4. 字符串替换            │    │ 零运行时依赖          │
-└─────────────┘    └──────────────────────────┘    └──────────────────────┘
-```
-
-编译流水线**零冗余**：单次源码解析、单次 AST 遍历（同时收集接口和记录调用点）、纯代码生成、基于位置的字符串替换。
-
-## 📁 项目结构
-
-```
-src/
-  ast/
-    types.ts            类型定义 + wire 常量
-    utils.ts            关键字检测、名称混淆
-    collector.ts        接口字段提取（pb + pb_repeated）
-    monomorphizer.ts    泛型类型实例化
-    analyzer.ts         单遍编排器
-  codegen/
-    encoder.ts          内联编码器生成
-    decoder.ts          内联解码器生成
-    generator.ts        前置代码 + 编排
-    wire.ts             Wire 格式测试辅助函数
-  transform/
-    replacer.ts         调用点重写
-  index.ts              Vite 插件入口
-```
+- **解码速度比 protobufjs 快 2–16 倍**，比 JSON.parse 快 3–16 倍 — 完全内联代码的核心优势
+- 编码速度与 protobufjs 处于同一量级（protobufjs 使用了预分配 Writer 缓冲区优化）
 
 ## 📄 许可证
 
