@@ -20,7 +20,8 @@
   "scripts": {
     "build": "tsup src/index.ts --format esm --dts",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "bench": "tsx bench/index.ts"
   },
   "dependencies": {
     "typescript": "^5.5.0"
@@ -30,6 +31,7 @@
   },
   "devDependencies": {
     "@types/node": "^25.4.0",
+    "protobufjs": "^8.0.0",
     "tsup": "^8.0.0",
     "vite": "^6.0.0",
     "vitest": "^3.0.0"
