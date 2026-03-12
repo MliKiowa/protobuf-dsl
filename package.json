@@ -21,7 +21,7 @@
     "build": "tsup src/index.ts --format esm --dts",
     "test": "vitest run",
     "test:watch": "vitest",
-    "bench": "tsx bench/index.ts"
+    "bench": "npx tsx bench/index.ts"
   },
   "dependencies": {
     "typescript": "^5.5.0"
