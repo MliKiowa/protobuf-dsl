@@ -2,26 +2,42 @@ import ts from 'typescript';
 import { WireType, PRIMITIVE_TYPE_MAP, type ProtobufMessage, type MessageRegistry, type GenericProtobufTemplate } from './types.js';
 import { collectInterface, collectGenericInterface } from './collector.js';
 import { monomorphizeTypeNode } from './monomorphizer.js';
+import { typeNodeToMangledName } from './utils.js';
 
-// Re-export for consumers
 export { typeNodeToMangledName } from './utils.js';
 
+/** A recorded call-site for later replacement. */
+export interface CallSiteRecord {
+  fnName: string;            // 'protobuf_encode' | 'protobuf_decode'
+  exprStart: number;         // position of identifier start
+  typeArgsEnd: number;       // position after closing '>'
+  firstTypeArg: ts.TypeNode; // the type argument node
+}
+
+export interface AnalysisResult {
+  registry: MessageRegistry;
+  callSites: CallSiteRecord[];
+  sourceFile: ts.SourceFile;
+}
+
 /**
- * Analyze TypeScript source and build a MessageRegistry.
+ * Analyze TypeScript source in a **single parse + single walk**.
  *
- * Pipeline:
- *  1. Collect concrete + generic interfaces
- *  2. Scan call-sites → monomorphize generics
- *  3. Resolve wire types
- *  4. Topological sort
+ * One walk handles both:
+ *  - Collecting concrete + generic interfaces
+ *  - Recording protobuf_encode/decode call-sites
+ *
+ * Then post-processes: monomorphize → resolve wire types → topo sort.
  */
-export function analyzeSource(code: string, filePath: string): MessageRegistry {
+export function analyze(code: string, filePath: string): AnalysisResult {
   const sf = ts.createSourceFile(filePath, code, ts.ScriptTarget.Latest, true);
   const concrete: ProtobufMessage[] = [];
   const templates = new Map<string, GenericProtobufTemplate>();
   const mono = new Map<string, ProtobufMessage>();
+  const callSites: CallSiteRecord[] = [];
+  const deferredTypeArgs: ts.TypeNode[] = [];
 
-  // 1 — collect interfaces
+  // ── single walk ─────────────────────────────────────────────────────
   ts.forEachChild(sf, function visit(node) {
     if (ts.isInterfaceDeclaration(node)) {
       if (node.typeParameters?.length) {
@@ -32,24 +48,33 @@ export function analyzeSource(code: string, filePath: string): MessageRegistry {
         if (msg) concrete.push(msg);
       }
     }
-    ts.forEachChild(node, visit);
-  });
 
-  // 2 — monomorphize from call-sites
-  ts.forEachChild(sf, function scan(node) {
     if (ts.isCallExpression(node)) {
       const e = node.expression;
       if (ts.isIdentifier(e) && (e.text === 'protobuf_encode' || e.text === 'protobuf_decode')) {
         const ta = node.typeArguments;
-        if (ta?.length) monomorphizeTypeNode(ta[0], sf, templates, mono);
+        if (ta?.length) {
+          deferredTypeArgs.push(ta[0]);
+          callSites.push({
+            fnName: e.text,
+            exprStart: e.getStart(sf),
+            typeArgsEnd: ta.end + 1,
+            firstTypeArg: ta[0],
+          });
+        }
       }
     }
-    ts.forEachChild(node, scan);
+
+    ts.forEachChild(node, visit);
   });
 
+  // ── post-walk: monomorphize deferred type args ──────────────────────
+  for (const typeArg of deferredTypeArgs) {
+    monomorphizeTypeNode(typeArg, sf, templates, mono);
+  }
   for (const m of mono.values()) concrete.push(m);
 
-  // 3 — resolve wire types
+  // ── resolve wire types ──────────────────────────────────────────────
   const names = new Set(concrete.map(m => m.name));
   for (const msg of concrete) {
     for (const f of msg.fields) {
@@ -59,8 +84,15 @@ export function analyzeSource(code: string, filePath: string): MessageRegistry {
     }
   }
 
-  // 4 — topological sort
-  return topoSort(concrete);
+  return { registry: topoSort(concrete), callSites, sourceFile: sf };
+}
+
+/**
+ * Backward-compatible wrapper: returns only the MessageRegistry.
+ * Uses the same single-walk analysis internally.
+ */
+export function analyzeSource(code: string, filePath: string): MessageRegistry {
+  return analyze(code, filePath).registry;
 }
 
 // ── topological sort ──────────────────────────────────────────────────
