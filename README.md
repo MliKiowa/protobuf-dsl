@@ -114,25 +114,32 @@ const data = protobuf_encode<Wrapper<Wrapper<string>>>({
 
 ## ⚡ 性能测试
 
-对比 `npm install -D @protobuf-ts/plugin protoc` 生成的 [protobuf-ts](https://github.com/timostamm/protobuf-ts) 代码，以及 [protobufjs](https://github.com/protobufjs/protobuf.js) 反射 API。benchmark 的 `.proto` 定义位于 `bench/proto/bench.proto`，生成入口是 `npm run bench:gen`，会先校验三者产出的 wire bytes 完全一致，再统计绝对吞吐率。下表统一以 `protobuf-dsl = 1x` 为基线，其他实现显示相对它慢了多少。
+benchmark 的 `.proto` 定义位于 `bench/proto/bench.proto`，生成入口是 `npm run bench:gen`。脚本会先校验所有实现产出的 wire bytes 完全一致，再统计绝对吞吐率。下表统一以 `protobuf-dsl = 1x` 为基线，其他实现显示相对它慢了多少。
+
+参与对比的实现：
+- `protobuf-ts(protoc)` — `@protobuf-ts/plugin + protoc` 生成代码
+- `protobuf-ts` — 手写 `MessageType` 反射运行时
+- `protobufjs(static)` — `pbjs static-module` 从同一份 `.proto` 生成代码
+- `protobufjs` — 反射 API
+- `protobuf` — `google-protobuf + protoc-gen-js` 生成代码
 
 > Node v22.11.0 | Windows x64 | 每项测试 50 万次迭代
 
 ### 编码性能（ops/sec — 越高越好）
 
-| 消息类型 | protobuf-dsl | protobuf-ts/protoc | protobufjs |
-|---------|:-----------:|:------------------:|:---------:|
-| 简单消息（1 个字段） | **36,959,559 (1x)** | 8,575,594 (4.31x slower) | 19,334,357 (1.91x slower) |
-| 多字段消息（3 个字段） | **12,603,792 (1x)** | 1,655,076 (7.62x slower) | 4,267,854 (2.95x slower) |
-| 嵌套消息 | **22,747,125 (1x)** | 3,056,270 (7.44x slower) | 10,330,835 (2.20x slower) |
+| 消息类型 | protobuf-dsl | protobuf-ts(protoc) | protobuf-ts | protobufjs(static) | protobufjs | protobuf |
+|---------|:-----------:|:-------------------:|:-----------:|:------------------:|:----------:|:--------:|
+| 简单消息（1 个字段） | **35,782,016 (1x)** | 8,238,128 (4.34x slower) | 5,828,158 (6.14x slower) | 16,466,923 (2.17x slower) | 16,819,500 (2.13x slower) | 5,794,260 (6.18x slower) |
+| 多字段消息（3 个字段） | **11,361,700 (1x)** | 1,767,940 (6.43x slower) | 1,394,561 (8.15x slower) | 4,481,491 (2.54x slower) | 4,240,911 (2.68x slower) | 1,609,704 (7.06x slower) |
+| 嵌套消息 | **21,264,923 (1x)** | 2,815,065 (7.55x slower) | 2,019,035 (10.53x slower) | 10,287,198 (2.07x slower) | 9,902,049 (2.15x slower) | 2,365,296 (8.99x slower) |
 
 ### 解码性能（ops/sec — 越高越好）
 
-| 消息类型 | protobuf-dsl | protobuf-ts/protoc | protobufjs |
-|---------|:-----------:|:------------------:|:---------:|
-| 简单消息（1 个字段） | **115,297,699 (1x)** | 8,981,159 (12.84x slower) | 33,670,941 (3.42x slower) |
-| 多字段消息（3 个字段） | **10,629,071 (1x)** | 4,287,286 (2.48x slower) | 5,527,812 (1.92x slower) |
-| 嵌套消息 | **64,363,318 (1x)** | 8,188,184 (7.86x slower) | 15,433,242 (4.17x slower) |
+| 消息类型 | protobuf-dsl | protobuf-ts(protoc) | protobuf-ts | protobufjs(static) | protobufjs | protobuf |
+|---------|:-----------:|:-------------------:|:-----------:|:------------------:|:----------:|:--------:|
+| 简单消息（1 个字段） | **99,577,790 (1x)** | 7,586,436 (13.13x slower) | 9,032,575 (11.02x slower) | 27,215,772 (3.66x slower) | 19,002,736 (5.24x slower) | 11,497,372 (8.66x slower) |
+| 多字段消息（3 个字段） | **10,190,107 (1x)** | 3,891,478 (2.62x slower) | 3,219,789 (3.16x slower) | 5,141,816 (1.98x slower) | 4,893,718 (2.08x slower) | 3,606,205 (2.83x slower) |
+| 嵌套消息 | **51,491,185 (1x)** | 8,376,444 (6.15x slower) | 6,033,801 (8.53x slower) | 11,922,077 (4.32x slower) | 13,326,794 (3.86x slower) | 3,148,311 (16.36x slower) |
 
 ## 许可证
 

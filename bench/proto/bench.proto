@@ -1,0 +1,21 @@
+syntax = "proto3";
+
+package bench;
+
+message SimpleMsg {
+  uint32 value = 1;
+}
+
+message UserProfile {
+  uint32 id = 1;
+  string username = 2;
+  bool active = 3;
+}
+
+message Inner {
+  uint32 value = 1;
+}
+
+message Outer {
+  Inner inner = 1;
+}
