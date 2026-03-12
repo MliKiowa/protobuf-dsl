@@ -18,7 +18,7 @@ describe('code generator', () => {
   it('generates encode/decode for simple uint_32', () => {
     const gen = generateCode(analyzeSource(loadFixture('simple.ts'), 't.ts'));
     expect(gen).toContain('function protobuf_encode_SimpleMsg(obj)');
-    expect(gen).toContain('function protobuf_decode_SimpleMsg(data)');
+    expect(gen).toContain('function protobuf_decode_SimpleMsg(data');
     // Tag for field 1, varint should be pre-computed as 0x08
     expect(gen).toContain('buf[offset++] = 8;');
   });
@@ -26,7 +26,7 @@ describe('code generator', () => {
   it('generates nested message code', () => {
     const gen = generateCode(analyzeSource(loadFixture('nested.ts'), 't.ts'));
     expect(gen).toContain('protobuf_encode_Inner(');
-    expect(gen).toContain('protobuf_decode_Inner(data.subarray(');
+    expect(gen).toContain('protobuf_decode_Inner(data, offset, offset + _len)');
   });
 
   it('round-trip uint_32', () => {
