@@ -137,10 +137,6 @@ const data = protobuf_encode<Wrapper<Wrapper<string>>>({
 | `{ id, username, active }` | **22 B** |
 | `{ inner: { value: 999 } }` | **5 B** |
 
-**核心结论：**
-- **编解码函数整体比 protobufjs 更快**，多数场景下解码可达 3–4 倍；只有多字段解码稍微持平。
-- 基准剔除 JSON，有助于突出与 Protobuf 本身的比较。
-
 ## 📄 许可证
 
 MIT
