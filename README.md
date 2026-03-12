@@ -1,4 +1,4 @@
-# protobuf-vite
+# protobuf-dsl
 
 一个 Vite 插件，将 TypeScript protobuf 接口在构建时编译为**完全内联**、零依赖的编解码函数。
 
@@ -16,7 +16,7 @@
 ## 📦 安装
 
 ```bash
-npm install protobuf-vite
+npm install protobuf-dsl
 ```
 
 ## 🚀 快速开始
@@ -24,7 +24,7 @@ npm install protobuf-vite
 **1. 在 `vite.config.ts` 中添加插件：**
 
 ```ts
-import protobufVite from 'protobuf-vite';
+import protobufVite from 'protobuf-dsl';
 
 export default defineConfig({
   plugins: [protobufVite()],
@@ -36,7 +36,7 @@ export default defineConfig({
 ```json
 {
   "compilerOptions": {
-    "types": ["protobuf-vite/types"]
+    "types": ["protobuf-dsl/types"]
   }
 }
 ```
@@ -116,7 +116,7 @@ const data = protobuf_encode<Wrapper<Wrapper<string>>>({
 
 ### 编码性能（ops/sec — 越高越好）
 
-| 消息类型 | protobuf-vite | protobufjs | JSON.stringify |
+| 消息类型 | protobuf-dsl | protobufjs | JSON.stringify |
 |---------|:---:|:---:|:---:|
 | 简单消息（1 个字段） | 15,290,894 | 18,114,564 | 11,939,358 |
 | 多字段消息（3 个字段） | 2,472,346 | 4,055,065 | 6,727,737 |
@@ -124,7 +124,7 @@ const data = protobuf_encode<Wrapper<Wrapper<string>>>({
 
 ### 解码性能（ops/sec — 越高越好）
 
-| 消息类型 | protobuf-vite | protobufjs | JSON.parse |
+| 消息类型 | protobuf-dsl | protobufjs | JSON.parse |
 |---------|:---:|:---:|:---:|
 | 简单消息（1 个字段） | **98,336,152** | 38,521,692 | 5,954,500 |
 | 多字段消息（3 个字段） | **10,011,954** | 9,308,110 | 3,701,779 |

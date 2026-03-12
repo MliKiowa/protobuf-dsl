@@ -78,7 +78,7 @@ const nestedObj = { inner: { value: 999 } };
 
 // ── run benchmarks ────────────────────────────────────────────────────
 
-console.log('# protobuf-vite Performance Benchmark\n');
+console.log('# protobuf-dsl Performance Benchmark\n');
 console.log(`Node ${process.version} | ${process.platform} ${process.arch}`);
 console.log(`Date: ${new Date().toISOString().slice(0, 10)}`);
 
@@ -91,12 +91,12 @@ console.log(`Date: ${new Date().toISOString().slice(0, 10)}`);
     const jStr = JSON.stringify(simpleObj);
 
     printSection('Encode — SimpleMsg { value: 12345 }', [
-        bench('protobuf-vite', () => vite.encode(simpleObj)),
+        bench('protobuf-dsl', () => vite.encode(simpleObj)),
         bench('protobufjs', () => pbjs.encode(simpleObj)),
         bench('JSON.stringify', () => JSON.stringify(simpleObj)),
     ]);
     printSection('Decode — SimpleMsg', [
-        bench('protobuf-vite', () => vite.decode(vEnc)),
+        bench('protobuf-dsl', () => vite.decode(vEnc)),
         bench('protobufjs', () => pbjs.decode(pEnc)),
         bench('JSON.parse', () => JSON.parse(jStr)),
     ]);
@@ -112,12 +112,12 @@ console.log(`Date: ${new Date().toISOString().slice(0, 10)}`);
     const jStr = JSON.stringify(multiObj);
 
     printSection('Encode — UserProfile { id, username, active }', [
-        bench('protobuf-vite', () => vite.encode(multiObj)),
+        bench('protobuf-dsl', () => vite.encode(multiObj)),
         bench('protobufjs', () => pbjs.encode(multiObj)),
         bench('JSON.stringify', () => JSON.stringify(multiObj)),
     ]);
     printSection('Decode — UserProfile', [
-        bench('protobuf-vite', () => vite.decode(vEnc)),
+        bench('protobuf-dsl', () => vite.decode(vEnc)),
         bench('protobufjs', () => pbjs.decode(pEnc)),
         bench('JSON.parse', () => JSON.parse(jStr)),
     ]);
@@ -133,12 +133,12 @@ console.log(`Date: ${new Date().toISOString().slice(0, 10)}`);
     const jStr = JSON.stringify(nestedObj);
 
     printSection('Encode — Outer { inner: Inner }', [
-        bench('protobuf-vite', () => vite.encode(nestedObj)),
+        bench('protobuf-dsl', () => vite.encode(nestedObj)),
         bench('protobufjs', () => pbjs.encode(nestedObj)),
         bench('JSON.stringify', () => JSON.stringify(nestedObj)),
     ]);
     printSection('Decode — Outer', [
-        bench('protobuf-vite', () => vite.decode(vEnc)),
+        bench('protobuf-dsl', () => vite.decode(vEnc)),
         bench('protobufjs', () => pbjs.decode(pEnc)),
         bench('JSON.parse', () => JSON.parse(jStr)),
     ]);
