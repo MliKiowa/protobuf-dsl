@@ -10,7 +10,7 @@ export function loadFixture(name: string): string {
 }
 
 /**
- * Run generated protobuf code via `new Function()` and return a named global value.
+ * Run generated code via `new Function()` and return a named global value.
  * Cleans up the global after retrieval.
  */
 export function execAndGet<T>(code: string, globalKey: string): T {
@@ -18,9 +18,4 @@ export function execAndGet<T>(code: string, globalKey: string): T {
     const val = (globalThis as any)[globalKey] as T;
     delete (globalThis as any)[globalKey];
     return val;
-}
-
-/** Build executable code: runtime + generated + assignment statement. */
-export function buildExec(runtime: string, generated: string, setup: string): string {
-    return runtime + '\n' + generated + '\n' + setup;
 }

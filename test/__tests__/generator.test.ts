@@ -1,16 +1,12 @@
 import { describe, it, expect } from 'vitest';
 import { analyzeSource } from '../../src/ast/analyzer';
 import { generateCode } from '../../src/codegen/generator';
-import { RUNTIME_FUNCTIONS } from '../../src/codegen/wire';
-import { loadFixture, execAndGet, buildExec } from '../helpers';
+import { loadFixture, execAndGet } from '../helpers';
 
-/** Helper: analyze fixture → generate → eval → return encode/decode pair */
+/** Analyze fixture → generate → eval → return encode/decode pair */
 function makeRoundTrip(fixtureName: string, msgName: string) {
-  const registry = analyzeSource(loadFixture(fixtureName), fixtureName);
-  const gen = generateCode(registry);
-  const code = buildExec(RUNTIME_FUNCTIONS, gen,
-    `globalThis.__enc = protobuf_encode_${msgName}; globalThis.__dec = protobuf_decode_${msgName};`);
-  new Function(code)();
+  const gen = generateCode(analyzeSource(loadFixture(fixtureName), fixtureName));
+  new Function(gen + `\nglobalThis.__enc = protobuf_encode_${msgName}; globalThis.__dec = protobuf_decode_${msgName};`)();
   const enc = (globalThis as any).__enc as (obj: any) => Uint8Array;
   const dec = (globalThis as any).__dec as (data: Uint8Array) => any;
   delete (globalThis as any).__enc;
@@ -23,13 +19,14 @@ describe('code generator', () => {
     const gen = generateCode(analyzeSource(loadFixture('simple.ts'), 't.ts'));
     expect(gen).toContain('function protobuf_encode_SimpleMsg(obj)');
     expect(gen).toContain('function protobuf_decode_SimpleMsg(data)');
-    expect(gen).toContain('__pb_writeTag(1, 0, buf)');
+    // Tag for field 1, varint should be pre-computed as 0x08
+    expect(gen).toContain('buf.push(8)');
   });
 
   it('generates nested message code', () => {
     const gen = generateCode(analyzeSource(loadFixture('nested.ts'), 't.ts'));
     expect(gen).toContain('protobuf_encode_Inner(obj.inner)');
-    expect(gen).toContain('protobuf_decode_Inner(data.subarray(lenOff, lenOff + len))');
+    expect(gen).toContain('protobuf_decode_Inner(data.subarray(');
   });
 
   it('round-trip uint_32', () => {
