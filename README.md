@@ -94,18 +94,23 @@ const data = protobuf_encode<Wrapper<Wrapper<string>>>({
 | Protobuf 类型 | TypeScript 类型 | Wire 类型 |
 |---------------|-----------------|-----------|
 | `uint_32`, `int_32` | `number` | Varint |
-| `uint_64`, `int_64` | `number` | Varint |
-| `sint_32`, `sint_64` | `number` | Varint |
+| `uint_64`, `int_64` | `bigint` | Varint |
+| `sint_32` | `number` | Varint |
+| `sint_64` | `bigint` | Varint |
 | `bool` | `boolean` | Varint |
 | `string` | `string` | LengthDelimited |
 | `bytes` | `Uint8Array` | LengthDelimited |
 | `float`, `fixed_32`, `sfixed_32` | `number` | 32-bit |
-| `double`, `fixed_64`, `sfixed_64` | `number` | 64-bit |
+| `double` | `number` | 64-bit |
+| `fixed_64`, `sfixed_64` | `bigint` | 64-bit |
 | 嵌套消息 | interface | LengthDelimited |
 
 字段标记：
 - `pb<fieldNumber, Type>` — 单值字段
 - `pb_repeated<fieldNumber, Type>` — 重复字段（→ `Type[]`）
+
+说明：
+- 所有 64 位整数类型在 TypeScript 中统一映射为 `bigint`
 
 ## ⚡ 性能测试
 
@@ -117,26 +122,18 @@ const data = protobuf_encode<Wrapper<Wrapper<string>>>({
 
 | 消息类型 | protobuf-dsl | protobufjs | 比例（×protobufjs） |
 |---------|:-----------:|:---------:|:------------------:|
-| 简单消息（1 个字段） | 46,226,101 | 19,432,569 | 2.38× |
-| 多字段消息（3 个字段） | 10,456,795 | 3,812,478 | 2.74× |
-| 嵌套消息 | 24,381,086 | 9,917,408 | 2.46× |
+| 简单消息（1 个字段） | 47,187,618 | 16,661,335 | 2.83× |
+| 多字段消息（3 个字段） | 11,443,324 | 3,894,718 | 2.94× |
+| 嵌套消息 | 24,282,689 | 9,361,122 | 2.59× |
 
 ### 解码性能（ops/sec — 越高越好）
 
 | 消息类型 | protobuf-dsl | protobufjs | 比例（×protobufjs） |
 |---------|:-----------:|:---------:|:------------------:|
-| 简单消息（1 个字段） | **111,552,363** | 38,146,973 | 2.92× |
-| 多字段消息（3 个字段） | 10,310,107 | 10,544,586 | 0.98× |
-| 嵌套消息 | 67,347,324 | 18,022,499 | 3.74× |
+| 简单消息（1 个字段） | **132,562,702** | 41,000,074 | 3.23× |
+| 多字段消息（3 个字段） | 11,324,028 | 10,692,557 | 1.06× |
+| 嵌套消息 | 82,220,614 | 17,485,269 | 4.70× |
 
-### Wire 体积（字节 — 越小越好）
-
-| 消息 | Protobuf |
-|------|:---------:|
-| `{ value: 12345 }` | **3 B** |
-| `{ id, username, active }` | **22 B** |
-| `{ inner: { value: 999 } }` | **5 B** |
-
-## 📄 许可证
+## 许可证
 
 MIT

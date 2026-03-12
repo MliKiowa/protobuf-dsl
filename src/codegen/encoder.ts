@@ -28,9 +28,42 @@ function varintSize(varName: string, ind: string): string {
 function writeVarint(expr: string, ind: string): string {
     return [
         `${ind}let _v = ${expr};`,
-        `${ind}while (_v > 0x7f) { buf[offset++] = (_v & 0x7f) | 0x80; _v >>>= 7; }`,
-        `${ind}buf[offset++] = _v & 0x7f;`,
+        `${ind}if (_v < 0x80) {`,
+        `${ind}  buf[offset++] = _v;`,
+        `${ind}} else if (_v < 0x4000) {`,
+        `${ind}  buf[offset++] = (_v & 0x7f) | 0x80;`,
+        `${ind}  buf[offset++] = _v >>> 7;`,
+        `${ind}} else if (_v < 0x200000) {`,
+        `${ind}  buf[offset++] = (_v & 0x7f) | 0x80;`,
+        `${ind}  buf[offset++] = ((_v >>> 7) & 0x7f) | 0x80;`,
+        `${ind}  buf[offset++] = _v >>> 14;`,
+        `${ind}} else if (_v < 0x10000000) {`,
+        `${ind}  buf[offset++] = (_v & 0x7f) | 0x80;`,
+        `${ind}  buf[offset++] = ((_v >>> 7) & 0x7f) | 0x80;`,
+        `${ind}  buf[offset++] = ((_v >>> 14) & 0x7f) | 0x80;`,
+        `${ind}  buf[offset++] = _v >>> 21;`,
+        `${ind}} else {`,
+        `${ind}  buf[offset++] = (_v & 0x7f) | 0x80;`,
+        `${ind}  buf[offset++] = ((_v >>> 7) & 0x7f) | 0x80;`,
+        `${ind}  buf[offset++] = ((_v >>> 14) & 0x7f) | 0x80;`,
+        `${ind}  buf[offset++] = ((_v >>> 21) & 0x7f) | 0x80;`,
+        `${ind}  buf[offset++] = _v >>> 28;`,
+        `${ind}}`,
     ].join('\n');
+}
+
+function isVarint64(typeName: string): boolean {
+    return typeName === 'uint_64' || typeName === 'int_64' || typeName === 'sint_64';
+}
+
+function isFixed64BigInt(typeName: string): boolean {
+    return typeName === 'fixed_64' || typeName === 'sfixed_64';
+}
+
+function bigintVarintExpr(typeName: string, expr: string): string {
+    if (typeName === 'uint_64') return `BigInt.asUintN(64, ${expr})`;
+    if (typeName === 'int_64') return `BigInt.asUintN(64, ${expr})`;
+    return `__zigZagEncode64(${expr})`;
 }
 
 interface EncoderBlock {
@@ -146,6 +179,27 @@ function buildSingularBlock(field: ProtobufField, index: number): EncoderBlock {
         };
     }
 
+    if (isVarint64(typeName)) {
+        const bigintExpr = bigintVarintExpr(typeName, valueVar);
+        return {
+            declare: [`  const ${valueVar} = obj.${name};`],
+            size: [
+                `  if (${valueVar} != null && ${valueVar} !== 0n) {`,
+                `    const _val = ${bigintExpr};`,
+                `    size += ${tagLength};`,
+                `    size += __varint64Size(_val);`,
+                `  }`,
+            ],
+            write: [
+                `  if (${valueVar} != null && ${valueVar} !== 0n) {`,
+                `    const _val = ${bigintExpr};`,
+                writeTag(fieldNumber, 0, '    '),
+                `    offset = __writeVarint64(buf, offset, _val);`,
+                `  }`,
+            ],
+        };
+    }
+
     if (wireType === WireType.Varint) {
         return {
             declare: [`  const ${valueVar} = obj.${name};`],
@@ -165,6 +219,19 @@ function buildSingularBlock(field: ProtobufField, index: number): EncoderBlock {
         };
     }
 
+    if (typeName === 'float') {
+        return {
+            declare: [`  const ${valueVar} = obj.${name};`],
+            size: [`  if (${valueVar} != null && ${valueVar} !== 0) size += ${tagLength + 4};`],
+            write: [
+                `  if (${valueVar} != null && ${valueVar} !== 0) {`,
+                writeTag(fieldNumber, 5, '    '),
+                `    offset = __writeFloat32(buf, offset, ${valueVar});`,
+                `  }`,
+            ],
+        };
+    }
+
     if (wireType === WireType.Bit32) {
         return {
             declare: [`  const ${valueVar} = obj.${name};`],
@@ -177,6 +244,32 @@ function buildSingularBlock(field: ProtobufField, index: number): EncoderBlock {
                 `    buf[offset++] = (_val >> 8) & 0xff;`,
                 `    buf[offset++] = (_val >> 16) & 0xff;`,
                 `    buf[offset++] = (_val >> 24) & 0xff;`,
+                `  }`,
+            ],
+        };
+    }
+
+    if (typeName === 'double') {
+        return {
+            declare: [`  const ${valueVar} = obj.${name};`],
+            size: [`  if (${valueVar} != null && ${valueVar} !== 0) size += ${tagLength + 8};`],
+            write: [
+                `  if (${valueVar} != null && ${valueVar} !== 0) {`,
+                writeTag(fieldNumber, 1, '    '),
+                `    offset = __writeFloat64(buf, offset, ${valueVar});`,
+                `  }`,
+            ],
+        };
+    }
+
+    if (isFixed64BigInt(typeName)) {
+        return {
+            declare: [`  const ${valueVar} = obj.${name};`],
+            size: [`  if (${valueVar} != null && ${valueVar} !== 0n) size += ${tagLength + 8};`],
+            write: [
+                `  if (${valueVar} != null && ${valueVar} !== 0n) {`,
+                writeTag(fieldNumber, 1, '    '),
+                `    offset = __writeFixed64(buf, offset, ${valueVar});`,
                 `  }`,
             ],
         };
@@ -316,6 +409,31 @@ function buildRepeatedBlock(field: ProtobufField, index: number): EncoderBlock {
         };
     }
 
+    if (isVarint64(typeName)) {
+        const bigintExpr = bigintVarintExpr(typeName, `${arrayVar}[_i]`);
+        return {
+            declare: [`  const ${arrayVar} = obj.${name};`],
+            size: [
+                `  if (${arrayVar} != null && ${arrayVar}.length > 0) {`,
+                `    for (let _i = 0; _i < ${arrayVar}.length; _i++) {`,
+                `      const _val = ${bigintExpr};`,
+                `      size += ${tagLength};`,
+                `      size += __varint64Size(_val);`,
+                `    }`,
+                `  }`,
+            ],
+            write: [
+                `  if (${arrayVar} != null && ${arrayVar}.length > 0) {`,
+                `    for (let _i = 0; _i < ${arrayVar}.length; _i++) {`,
+                `      const _val = ${bigintExpr};`,
+                writeTag(fieldNumber, 0, '      '),
+                `      offset = __writeVarint64(buf, offset, _val);`,
+                `    }`,
+                `  }`,
+            ],
+        };
+    }
+
     if (wireType === WireType.Varint) {
         return {
             declare: [`  const ${arrayVar} = obj.${name};`],
@@ -339,6 +457,21 @@ function buildRepeatedBlock(field: ProtobufField, index: number): EncoderBlock {
         };
     }
 
+    if (typeName === 'float') {
+        return {
+            declare: [`  const ${arrayVar} = obj.${name};`],
+            size: [`  if (${arrayVar} != null && ${arrayVar}.length > 0) size += ${arrayVar}.length * ${tagLength + 4};`],
+            write: [
+                `  if (${arrayVar} != null && ${arrayVar}.length > 0) {`,
+                `    for (let _i = 0; _i < ${arrayVar}.length; _i++) {`,
+                writeTag(fieldNumber, 5, '      '),
+                `      offset = __writeFloat32(buf, offset, ${arrayVar}[_i]);`,
+                `    }`,
+                `  }`,
+            ],
+        };
+    }
+
     if (wireType === WireType.Bit32) {
         return {
             declare: [`  const ${arrayVar} = obj.${name};`],
@@ -352,6 +485,36 @@ function buildRepeatedBlock(field: ProtobufField, index: number): EncoderBlock {
                 `      buf[offset++] = (_val >> 8) & 0xff;`,
                 `      buf[offset++] = (_val >> 16) & 0xff;`,
                 `      buf[offset++] = (_val >> 24) & 0xff;`,
+                `    }`,
+                `  }`,
+            ],
+        };
+    }
+
+    if (typeName === 'double') {
+        return {
+            declare: [`  const ${arrayVar} = obj.${name};`],
+            size: [`  if (${arrayVar} != null && ${arrayVar}.length > 0) size += ${arrayVar}.length * ${tagLength + 8};`],
+            write: [
+                `  if (${arrayVar} != null && ${arrayVar}.length > 0) {`,
+                `    for (let _i = 0; _i < ${arrayVar}.length; _i++) {`,
+                writeTag(fieldNumber, 1, '      '),
+                `      offset = __writeFloat64(buf, offset, ${arrayVar}[_i]);`,
+                `    }`,
+                `  }`,
+            ],
+        };
+    }
+
+    if (isFixed64BigInt(typeName)) {
+        return {
+            declare: [`  const ${arrayVar} = obj.${name};`],
+            size: [`  if (${arrayVar} != null && ${arrayVar}.length > 0) size += ${arrayVar}.length * ${tagLength + 8};`],
+            write: [
+                `  if (${arrayVar} != null && ${arrayVar}.length > 0) {`,
+                `    for (let _i = 0; _i < ${arrayVar}.length; _i++) {`,
+                writeTag(fieldNumber, 1, '      '),
+                `      offset = __writeFixed64(buf, offset, ${arrayVar}[_i]);`,
                 `    }`,
                 `  }`,
             ],

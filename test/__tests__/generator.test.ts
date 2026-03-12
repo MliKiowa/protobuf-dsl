@@ -14,6 +14,16 @@ function makeRoundTrip(fixtureName: string, msgName: string) {
   return { enc, dec };
 }
 
+function makeRoundTripFromSchema(schema: string, msgName: string) {
+  const gen = generateCode(analyzeSource(schema, `${msgName}.ts`));
+  new Function(gen + `\nglobalThis.__enc = protobuf_encode_${msgName}; globalThis.__dec = protobuf_decode_${msgName};`)();
+  const enc = (globalThis as any).__enc as (obj: any) => Uint8Array;
+  const dec = (globalThis as any).__dec as (data: Uint8Array) => any;
+  delete (globalThis as any).__enc;
+  delete (globalThis as any).__dec;
+  return { enc, dec };
+}
+
 describe('code generator', () => {
   it('generates encode/decode for simple uint_32', () => {
     const gen = generateCode(analyzeSource(loadFixture('simple.ts'), 't.ts'));
@@ -81,5 +91,40 @@ describe('code generator', () => {
     const result = dec(enc({ ids: [], names: [] }));
     expect(result.ids).toEqual([]);
     expect(result.names).toEqual([]);
+  });
+
+  it('round-trip bigint-backed 64-bit integers', () => {
+    const schema = `
+interface BigIntMsg {
+  unsigned: pb<1, uint_64>;
+  signed: pb<2, int_64>;
+  zigzag: pb<3, sint_64>;
+  fixed: pb<4, fixed_64>;
+  sfixed: pb<5, sfixed_64>;
+  ids: pb_repeated<6, uint_64>;
+}`;
+    const { enc, dec } = makeRoundTripFromSchema(schema, 'BigIntMsg');
+    const input = {
+      unsigned: 18446744073709551615n,
+      signed: -1n,
+      zigzag: -1234567890123456789n,
+      fixed: 0x0102030405060708n,
+      sfixed: -0x0102030405060708n,
+      ids: [1n, 2n, 9007199254740993n],
+    };
+    expect(dec(enc(input))).toEqual(input);
+  });
+
+  it('round-trip double as ieee754 number', () => {
+    const schema = `
+interface DoubleMsg {
+  value: pb<1, double>;
+  values: pb_repeated<2, double>;
+}`;
+    const { enc, dec } = makeRoundTripFromSchema(schema, 'DoubleMsg');
+    const result = dec(enc({ value: Math.PI, values: [Math.E, -0.5] }));
+    expect(result.value).toBeCloseTo(Math.PI);
+    expect(result.values[0]).toBeCloseTo(Math.E);
+    expect(result.values[1]).toBeCloseTo(-0.5);
   });
 });
