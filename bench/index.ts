@@ -34,10 +34,14 @@ function bench(name: string, fn: () => void, iterations = 500_000): BenchResult 
 
 function printSection(title: string, results: BenchResult[]) {
     console.log(`\n## ${title}`);
-    console.log('| Library | ops/sec | ns/op |');
-    console.log('|---------|---------|-------|');
+    console.log('| Library | ops/sec | ns/op | relative |');
+    console.log('|---------|---------|-------|----------|');
+    // baseline for relative comparison is protobufjs
+    const base = results.find(r => r.name === 'protobufjs')?.opsPerSec || results[1]?.opsPerSec;
     for (const r of results) {
-        console.log(`| ${r.name} | ${r.opsPerSec.toLocaleString()} | ${r.nsPerOp} |`);
+        const rel = base ? (r.opsPerSec / base) : 1;
+        const relStr = r.name === 'protobufjs' ? '1×' : `${rel.toFixed(2)}×`;
+        console.log(`| ${r.name} | ${r.opsPerSec.toLocaleString()} | ${r.nsPerOp} | ${relStr} |`);
     }
 }
 
@@ -88,19 +92,16 @@ console.log(`Date: ${new Date().toISOString().slice(0, 10)}`);
     const pbjs = makePbjsFns(simplePbjs, 'SimpleMsg');
     const vEnc = vite.encode(simpleObj);
     const pEnc = pbjs.encode(simpleObj);
-    const jStr = JSON.stringify(simpleObj);
 
     printSection('Encode — SimpleMsg { value: 12345 }', [
         bench('protobuf-dsl', () => vite.encode(simpleObj)),
         bench('protobufjs', () => pbjs.encode(simpleObj)),
-        bench('JSON.stringify', () => JSON.stringify(simpleObj)),
     ]);
     printSection('Decode — SimpleMsg', [
         bench('protobuf-dsl', () => vite.decode(vEnc)),
         bench('protobufjs', () => pbjs.decode(pEnc)),
-        bench('JSON.parse', () => JSON.parse(jStr)),
     ]);
-    console.log(`\n> Wire size: protobuf ${vEnc.length}B vs JSON ${jStr.length}B`);
+    console.log(`\n> Wire size: protobuf ${vEnc.length}B`);
 }
 
 // Multi-field
@@ -109,19 +110,16 @@ console.log(`Date: ${new Date().toISOString().slice(0, 10)}`);
     const pbjs = makePbjsFns(multiPbjs, 'UserProfile');
     const vEnc = vite.encode(multiObj);
     const pEnc = pbjs.encode(multiObj);
-    const jStr = JSON.stringify(multiObj);
 
     printSection('Encode — UserProfile { id, username, active }', [
         bench('protobuf-dsl', () => vite.encode(multiObj)),
         bench('protobufjs', () => pbjs.encode(multiObj)),
-        bench('JSON.stringify', () => JSON.stringify(multiObj)),
     ]);
     printSection('Decode — UserProfile', [
         bench('protobuf-dsl', () => vite.decode(vEnc)),
         bench('protobufjs', () => pbjs.decode(pEnc)),
-        bench('JSON.parse', () => JSON.parse(jStr)),
     ]);
-    console.log(`\n> Wire size: protobuf ${vEnc.length}B vs JSON ${jStr.length}B`);
+    console.log(`\n> Wire size: protobuf ${vEnc.length}B`);
 }
 
 // Nested
@@ -130,17 +128,14 @@ console.log(`Date: ${new Date().toISOString().slice(0, 10)}`);
     const pbjs = makePbjsFns(nestedPbjs, 'Outer');
     const vEnc = vite.encode(nestedObj);
     const pEnc = pbjs.encode(nestedObj);
-    const jStr = JSON.stringify(nestedObj);
 
     printSection('Encode — Outer { inner: Inner }', [
         bench('protobuf-dsl', () => vite.encode(nestedObj)),
         bench('protobufjs', () => pbjs.encode(nestedObj)),
-        bench('JSON.stringify', () => JSON.stringify(nestedObj)),
     ]);
     printSection('Decode — Outer', [
         bench('protobuf-dsl', () => vite.decode(vEnc)),
         bench('protobufjs', () => pbjs.decode(pEnc)),
-        bench('JSON.parse', () => JSON.parse(jStr)),
     ]);
-    console.log(`\n> Wire size: protobuf ${vEnc.length}B vs JSON ${jStr.length}B`);
+    console.log(`\n> Wire size: protobuf ${vEnc.length}B`);
 }
