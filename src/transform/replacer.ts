@@ -44,18 +44,36 @@ export function replaceCallSites(code: string, registry: MessageRegistry): { tra
   const sf = ts.createSourceFile('input.ts', code, ts.ScriptTarget.Latest, true);
   const callSites: CallSiteRecord[] = [];
 
+  // Collect import aliases
+  const CANONICAL = new Set(['protobuf_encode', 'protobuf_decode']);
+  const aliasToCanonical = new Map<string, string>();
+  for (const stmt of sf.statements) {
+    if (!ts.isImportDeclaration(stmt) || !stmt.importClause) continue;
+    const bindings = stmt.importClause.namedBindings;
+    if (!bindings || !ts.isNamedImports(bindings)) continue;
+    for (const el of bindings.elements) {
+      const originalName = (el.propertyName ?? el.name).text;
+      if (CANONICAL.has(originalName)) {
+        aliasToCanonical.set(el.name.text, originalName);
+      }
+    }
+  }
+
   ts.forEachChild(sf, function visit(node) {
     if (ts.isCallExpression(node)) {
       const e = node.expression;
-      if (ts.isIdentifier(e) && (e.text === 'protobuf_encode' || e.text === 'protobuf_decode')) {
-        const ta = node.typeArguments;
-        if (ta?.length) {
-          callSites.push({
-            fnName: e.text,
-            exprStart: e.getStart(sf),
-            typeArgsEnd: ta.end + 1,
-            firstTypeArg: ta[0],
-          });
+      if (ts.isIdentifier(e)) {
+        const canonical = CANONICAL.has(e.text) ? e.text : aliasToCanonical.get(e.text);
+        if (canonical) {
+          const ta = node.typeArguments;
+          if (ta?.length) {
+            callSites.push({
+              fnName: canonical,
+              exprStart: e.getStart(sf),
+              typeArgsEnd: ta.end + 1,
+              firstTypeArg: ta[0],
+            });
+          }
         }
       }
     }

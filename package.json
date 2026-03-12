@@ -1,24 +1,25 @@
 {
   "name": "protobuf-fastdsl",
-  "version": "0.1.2",
+  "version": "0.1.5",
   "type": "module",
-  "main": "dist/index.js",
-  "types": "dist/index.d.ts",
+  "main": "dist/runtime.js",
+  "types": "protobuf.d.ts",
   "files": [
     "dist",
     "protobuf.d.ts"
   ],
   "exports": {
     ".": {
+      "types": "./protobuf.d.ts",
+      "import": "./dist/runtime.js"
+    },
+    "./vite": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
-    },
-    "./types": {
-      "types": "./protobuf.d.ts"
     }
   },
   "scripts": {
-    "build": "tsup src/index.ts --format esm --dts",
+    "build": "tsup src/index.ts src/runtime.ts --format esm --dts",
     "test": "vitest run",
     "test:watch": "vitest",
     "bench": "npx tsx bench/index.ts"
@@ -28,6 +29,9 @@
   },
   "peerDependencies": {
     "vite": "^5.0.0 || ^6.0.0 || ^7.0.0"
+  },
+  "peerDependenciesMeta": {
+    "vite": { "optional": true }
   },
   "devDependencies": {
     "@types/node": "^25.4.0",

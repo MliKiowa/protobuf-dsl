@@ -1,6 +1,6 @@
 # protobuf-fastdsl
 
-一个 Vite 插件，将 TypeScript protobuf 接口在构建时编译为**完全内联**、零依赖的编解码函数。
+将 TypeScript 接口在构建时编译为**完全内联**、零依赖的 protobuf 编解码函数。
 
 无 `.proto` 文件。无运行时库。无函数调用开销。只需 TypeScript 接口 → 确定化的二进制编解码代码。
 
@@ -8,9 +8,11 @@
 
 - **零运行时** — 所有 wire-format 逻辑在编译时内联
 - **TypeScript 原生** — 用 `pb<N, Type>` 标记接口字段即可定义 schema
+- **跨文件类型** — 支持 `import type` / `import` 引用其他文件的接口定义
 - **泛型单态化** — `Wrapper<Wrapper<string>>` → 自动生成具体编解码函数
 - **重复字段** — `pb_repeated<N, Type>` 编译为 `Type[]`
 - **编译期预计算 Tag** — 字段标签在编译时折叠为字面量字节
+- **安全的 Fallback** — 未经插件转换时运行会直接抛错，不会静默产生错误结果
 
 ## 安装
 
@@ -20,30 +22,24 @@ npm install protobuf-fastdsl
 
 ## 快速开始
 
-**1. 在 `vite.config.ts` 中添加插件：**
+**1. 配置构建工具插件：**
 
 ```ts
-import protobufVite from 'protobuf-fastdsl';
+// vite.config.ts
+import protobufPlugin from 'protobuf-fastdsl/vite';
 
 export default defineConfig({
-  plugins: [protobufVite()],
+  plugins: [protobufPlugin()],
 });
 ```
 
-**2. 在 `tsconfig.json` 中添加类型声明：**
-
-```json
-{
-  "compilerOptions": {
-    "types": ["protobuf-fastdsl/types"]
-  }
-}
-```
-
-**3. 用 TypeScript 接口定义 schema：**
+**2. 定义 protobuf schema（TypeScript 接口）：**
 
 ```ts
-interface UserProfile {
+// schema/user.ts
+import type { pb, pb_repeated, uint_32, bool } from 'protobuf-fastdsl';
+
+export interface UserProfile {
   id:       pb<1, uint_32>;
   username: pb<2, string>;
   active:   pb<3, bool>;
@@ -51,9 +47,12 @@ interface UserProfile {
 }
 ```
 
-**4. 使用 `protobuf_encode` / `protobuf_decode`：**
+**3. 编解码：**
 
 ```ts
+import { protobuf_encode, protobuf_decode } from 'protobuf-fastdsl';
+import type { UserProfile } from './schema/user';
+
 const bytes = protobuf_encode<UserProfile>({
   id: 42,
   username: 'alice',
@@ -65,12 +64,49 @@ const user = protobuf_decode<UserProfile>(bytes);
 // user.id === 42, user.tags === ['admin', 'dev']
 ```
 
-构建时，插件会将上述代码转换为：
+构建时，插件将上述代码转换为：
 
 ```js
 // 预计算的 tag 字面量，内联 varint 循环，零函数调用
 const bytes = protobuf_encode_UserProfile({ id: 42, ... });
 const user = protobuf_decode_UserProfile(bytes);
+```
+
+如果忘记配置插件，`protobuf_encode` / `protobuf_decode` 会在运行时抛出错误提示。
+
+## 跨文件类型引用
+
+接口定义和编解码调用可以在不同文件中，插件会自动跟踪 import 链：
+
+```ts
+// inner.ts
+import type { pb, uint_32 } from 'protobuf-fastdsl';
+
+export interface Inner {
+  value: pb<1, uint_32>;
+}
+
+// outer.ts
+import { protobuf_encode } from 'protobuf-fastdsl';
+import type { Inner } from './inner';
+import type { pb } from 'protobuf-fastdsl';
+
+interface Outer {
+  inner: pb<1, Inner>;
+}
+
+const bytes = protobuf_encode<Outer>({ inner: { value: 42 } });
+```
+
+支持传递性导入（A → B → C），插件会递归解析所有依赖。
+
+## 别名导入
+
+```ts
+import { protobuf_encode as encode, protobuf_decode as decode } from 'protobuf-fastdsl';
+
+const bytes = encode<UserProfile>(data);  // → protobuf_encode_UserProfile(data)
+const user = decode<UserProfile>(bytes);  // → protobuf_decode_UserProfile(bytes)
 ```
 
 ## 泛型单态化
@@ -95,8 +131,8 @@ const data = protobuf_encode<Wrapper<Wrapper<string>>>({
 |---------------|-----------------|-----------|
 | `uint_32`, `int_32` | `number` | Varint |
 | `uint_64`, `int_64` | `bigint` | Varint |
-| `sint_32` | `number` | Varint |
-| `sint_64` | `bigint` | Varint |
+| `sint_32` | `number` | Varint (ZigZag) |
+| `sint_64` | `bigint` | Varint (ZigZag) |
 | `bool` | `boolean` | Varint |
 | `string` | `string` | LengthDelimited |
 | `bytes` | `Uint8Array` | LengthDelimited |
@@ -111,6 +147,14 @@ const data = protobuf_encode<Wrapper<Wrapper<string>>>({
 
 说明：
 - 所有 64 位整数类型在 TypeScript 中统一映射为 `bigint`
+- `sint_32` / `sint_64` 使用 ZigZag 编码，适用于频繁出现负数的场景
+
+## 包入口
+
+| 路径 | 用途 |
+|------|------|
+| `protobuf-fastdsl` | 用户代码 — `protobuf_encode`、`protobuf_decode`、所有类型 |
+| `protobuf-fastdsl/vite` | Vite 插件 |
 
 ## ⚡ 性能测试
 

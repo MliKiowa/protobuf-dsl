@@ -1,25 +1,25 @@
 // ── Protobuf field markers ────────────────────────────────────────────
 /** Marks a singular protobuf field: `name: pb<fieldNumber, Type>` */
-type pb<_ProtoNumber extends number, Type> = Type;
+export type pb<_ProtoNumber extends number, Type> = Type;
 /** Marks a repeated protobuf field: `ids: pb_repeated<fieldNumber, Type>` → Type[] */
-type pb_repeated<_ProtoNumber extends number, Type> = Type[];
+export type pb_repeated<_ProtoNumber extends number, Type> = Type[];
 
 // ── Protobuf primitive types ──────────────────────────────────────────
-type uint_32 = number;
-type int_32 = number;
-type uint_64 = bigint;
-type int_64 = bigint;
-type sint_32 = number;
-type sint_64 = bigint;
-type bool = boolean;
-type float = number;
-type double = number;
-type fixed_32 = number;
-type fixed_64 = bigint;
-type sfixed_32 = number;
-type sfixed_64 = bigint;
-type bytes = Uint8Array;
+export type uint_32 = number;
+export type int_32 = number;
+export type uint_64 = bigint;
+export type int_64 = bigint;
+export type sint_32 = number;
+export type sint_64 = bigint;
+export type bool = boolean;
+export type float = number;
+export type double = number;
+export type fixed_32 = number;
+export type fixed_64 = bigint;
+export type sfixed_32 = number;
+export type sfixed_64 = bigint;
+export type bytes = Uint8Array;
 
-// ── Encode / decode stubs (replaced at compile-time by the vite plugin) ──
-declare function protobuf_encode<T>(params: T): Uint8Array;
-declare function protobuf_decode<T>(data: Uint8Array): T;
+// ── Encode / decode (replaced at compile-time by the vite plugin) ────
+export function protobuf_encode<T>(params: T): Uint8Array;
+export function protobuf_decode<T>(data: Uint8Array): T;

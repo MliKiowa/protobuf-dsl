@@ -101,4 +101,92 @@ describe('plugin integration', () => {
     expect(result.ids).toEqual([]);
     expect(result.names).toEqual([]);
   });
+
+  // ── import-based usage ──────────────────────────────────────────────
+
+  it('handles code with import { protobuf_encode } from "protobuf-fastdsl"', () => {
+    const code = `
+import { protobuf_encode, protobuf_decode } from 'protobuf-fastdsl';
+
+interface Msg { id: pb<1, uint_32>; }
+
+const buf = protobuf_encode<Msg>({ id: 1 });
+const decoded = protobuf_decode<Msg>(buf);
+`;
+    const registry = analyzeSource(code, 'import-test.ts');
+    expect(registry.has('Msg')).toBe(true);
+
+    const { transformedCode, hasReplacements } = replaceCallSites(code, registry);
+    expect(hasReplacements).toBe(true);
+    expect(transformedCode).toContain('protobuf_encode_Msg(');
+    expect(transformedCode).toContain('protobuf_decode_Msg(');
+    // import line preserved
+    expect(transformedCode).toContain("from 'protobuf-fastdsl'");
+  });
+
+  it('import-based round-trip', () => {
+    const code = `
+import { protobuf_encode, protobuf_decode } from 'protobuf-fastdsl';
+
+interface Msg { id: pb<1, uint_32>; name: pb<2, string>; }
+
+const buf = protobuf_encode<Msg>({ id: 42, name: 'test' });
+const decoded = protobuf_decode<Msg>(buf);
+`;
+    const registry = analyzeSource(code, 'import-test.ts');
+    const gen = generateCode(registry);
+    const result = execAndGet<any>(gen + `\n
+      const enc = protobuf_encode_Msg({ id: 42, name: 'test' });
+      globalThis.__r = protobuf_decode_Msg(enc);
+    `, '__r');
+    expect(result.id).toBe(42);
+    expect(result.name).toBe('test');
+  });
+
+  it('runtime fallback throws error', async () => {
+    const { protobuf_encode, protobuf_decode } = await import('../../src/runtime');
+    expect(() => protobuf_encode({})).toThrow('not transformed');
+    expect(() => protobuf_decode(new Uint8Array())).toThrow('not transformed');
+  });
+
+  // ── import rename alias ─────────────────────────────────────────────
+
+  it('handles import { protobuf_encode as encode }', () => {
+    const code = `
+import { protobuf_encode as encode, protobuf_decode as decode } from 'protobuf-fastdsl';
+
+interface Msg { id: pb<1, uint_32>; }
+
+const buf = encode<Msg>({ id: 1 });
+const decoded = decode<Msg>(buf);
+`;
+    const registry = analyzeSource(code, 'alias-test.ts');
+    expect(registry.has('Msg')).toBe(true);
+
+    const { transformedCode, hasReplacements } = replaceCallSites(code, registry);
+    expect(hasReplacements).toBe(true);
+    expect(transformedCode).toContain('protobuf_encode_Msg(');
+    expect(transformedCode).toContain('protobuf_decode_Msg(');
+    // alias calls replaced, import preserved
+    expect(transformedCode).not.toContain('encode<Msg>');
+    expect(transformedCode).not.toContain('decode<Msg>');
+  });
+
+  it('rename alias round-trip', () => {
+    const code = `
+import { protobuf_encode as enc } from 'protobuf-fastdsl';
+
+interface Item { val: pb<1, uint_32>; name: pb<2, string>; }
+
+const buf = enc<Item>({ val: 99, name: 'x' });
+`;
+    const registry = analyzeSource(code, 'alias-rt.ts');
+    const gen = generateCode(registry);
+    const result = execAndGet<any>(gen + `\n
+      const enc = protobuf_encode_Item({ val: 99, name: 'x' });
+      globalThis.__r = protobuf_decode_Item(enc);
+    `, '__r');
+    expect(result.val).toBe(99);
+    expect(result.name).toBe('x');
+  });
 });
