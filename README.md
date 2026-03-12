@@ -1,4 +1,4 @@
-# protobuf-dsl
+# protobuf-fastdsl
 
 一个 Vite 插件，将 TypeScript protobuf 接口在构建时编译为**完全内联**、零依赖的编解码函数。
 
@@ -15,7 +15,7 @@
 ## 安装
 
 ```bash
-npm install protobuf-dsl
+npm install protobuf-fastdsl
 ```
 
 ## 快速开始
@@ -23,7 +23,7 @@ npm install protobuf-dsl
 **1. 在 `vite.config.ts` 中添加插件：**
 
 ```ts
-import protobufVite from 'protobuf-dsl';
+import protobufVite from 'protobuf-fastdsl';
 
 export default defineConfig({
   plugins: [protobufVite()],
@@ -35,7 +35,7 @@ export default defineConfig({
 ```json
 {
   "compilerOptions": {
-    "types": ["protobuf-dsl/types"]
+    "types": ["protobuf-fastdsl/types"]
   }
 }
 ```
@@ -114,7 +114,7 @@ const data = protobuf_encode<Wrapper<Wrapper<string>>>({
 
 ## ⚡ 性能测试
 
-benchmark 的 `.proto` 定义位于 `bench/proto/bench.proto`，生成入口是 `npm run bench:gen`。脚本会先校验所有实现产出的 wire bytes 完全一致，再统计绝对吞吐率。下表统一以 `protobuf-dsl = 1x` 为基线，其他实现显示相对它慢了多少。
+benchmark 的 `.proto` 定义位于 `bench/proto/bench.proto`，生成入口是 `npm run bench:gen`。脚本会先校验所有实现产出的 wire bytes 完全一致，再统计绝对吞吐率。下表统一以 `protobuf-fastdsl = 1x` 为基线，其他实现显示相对它慢了多少。
 
 参与对比的实现：
 - `protobuf-ts(protoc)` — `@protobuf-ts/plugin + protoc` 生成代码
@@ -127,7 +127,7 @@ benchmark 的 `.proto` 定义位于 `bench/proto/bench.proto`，生成入口是 
 
 ### 编码性能（ops/sec — 越高越好）
 
-| 消息类型 | protobuf-dsl | protobuf-ts(protoc) | protobuf-ts | protobufjs(static) | protobufjs | protobuf |
+| 消息类型 | protobuf-fastdsl | protobuf-ts(protoc) | protobuf-ts | protobufjs(static) | protobufjs | protobuf |
 |---------|:-----------:|:-------------------:|:-----------:|:------------------:|:----------:|:--------:|
 | 简单消息（1 个字段） | **35,782,016 (1x)** | 8,238,128 (4.34x slower) | 5,828,158 (6.14x slower) | 16,466,923 (2.17x slower) | 16,819,500 (2.13x slower) | 5,794,260 (6.18x slower) |
 | 多字段消息（3 个字段） | **11,361,700 (1x)** | 1,767,940 (6.43x slower) | 1,394,561 (8.15x slower) | 4,481,491 (2.54x slower) | 4,240,911 (2.68x slower) | 1,609,704 (7.06x slower) |
@@ -135,7 +135,7 @@ benchmark 的 `.proto` 定义位于 `bench/proto/bench.proto`，生成入口是 
 
 ### 解码性能（ops/sec — 越高越好）
 
-| 消息类型 | protobuf-dsl | protobuf-ts(protoc) | protobuf-ts | protobufjs(static) | protobufjs | protobuf |
+| 消息类型 | protobuf-fastdsl | protobuf-ts(protoc) | protobuf-ts | protobufjs(static) | protobufjs | protobuf |
 |---------|:-----------:|:-------------------:|:-----------:|:------------------:|:----------:|:--------:|
 | 简单消息（1 个字段） | **99,577,790 (1x)** | 7,586,436 (13.13x slower) | 9,032,575 (11.02x slower) | 27,215,772 (3.66x slower) | 19,002,736 (5.24x slower) | 11,497,372 (8.66x slower) |
 | 多字段消息（3 个字段） | **10,190,107 (1x)** | 3,891,478 (2.62x slower) | 3,219,789 (3.16x slower) | 5,141,816 (1.98x slower) | 4,893,718 (2.08x slower) | 3,606,205 (2.83x slower) |
