@@ -20,12 +20,12 @@ describe('code generator', () => {
     expect(gen).toContain('function protobuf_encode_SimpleMsg(obj)');
     expect(gen).toContain('function protobuf_decode_SimpleMsg(data)');
     // Tag for field 1, varint should be pre-computed as 0x08
-    expect(gen).toContain('buf.push(8)');
+    expect(gen).toContain('buf[offset++] = 8;');
   });
 
   it('generates nested message code', () => {
     const gen = generateCode(analyzeSource(loadFixture('nested.ts'), 't.ts'));
-    expect(gen).toContain('protobuf_encode_Inner(obj.inner)');
+    expect(gen).toContain('protobuf_encode_Inner(');
     expect(gen).toContain('protobuf_decode_Inner(data.subarray(');
   });
 
@@ -42,6 +42,11 @@ describe('code generator', () => {
   it('round-trip string', () => {
     const { enc, dec } = makeRoundTrip('string-msg.ts', 'StringMsg');
     expect(dec(enc({ text: 'hello world' })).text).toBe('hello world');
+  });
+
+  it('round-trip unicode string', () => {
+    const { enc, dec } = makeRoundTrip('string-msg.ts', 'StringMsg');
+    expect(dec(enc({ text: '你好，protobuf🚀' })).text).toBe('你好，protobuf🚀');
   });
 
   it('round-trip bool', () => {

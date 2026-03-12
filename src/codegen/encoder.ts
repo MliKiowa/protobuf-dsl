@@ -2,170 +2,384 @@ import { WireType, type ProtobufField, type ProtobufMessage, type MessageRegistr
 
 /**
  * Pre-compute tag bytes at codegen time.
- * Field 1 + Varint(0) → [0x08], Field 1 + LenDelim(2) → [0x0a], etc.
+ * Field 1 + Varint(0) -> [0x08], Field 1 + LenDelim(2) -> [0x0a], etc.
  */
 function computeTagBytes(fieldNumber: number, wireType: number): number[] {
-    let v = ((fieldNumber << 3) | wireType) >>> 0;
+    let value = ((fieldNumber << 3) | wireType) >>> 0;
     const bytes: number[] = [];
-    while (v > 0x7f) { bytes.push((v & 0x7f) | 0x80); v >>>= 7; }
-    bytes.push(v & 0x7f);
+    while (value > 0x7f) {
+        bytes.push((value & 0x7f) | 0x80);
+        value >>>= 7;
+    }
+    bytes.push(value & 0x7f);
     return bytes;
 }
 
-/** Emit a pre-computed tag push. */
-function tag(fn: number, wt: number, ind: string): string {
-    return `${ind}buf.push(${computeTagBytes(fn, wt).join(', ')});`;
+function writeTag(fieldNumber: number, wireType: number, ind: string): string {
+    return computeTagBytes(fieldNumber, wireType)
+        .map(byte => `${ind}buf[offset++] = ${byte};`)
+        .join('\n');
 }
 
-/** Emit inline varint encode of an expression. */
-function varintEnc(expr: string, ind: string): string {
+function varintSize(varName: string, ind: string): string {
+    return `${ind}size += ${varName} < 0x80 ? 1 : ${varName} < 0x4000 ? 2 : ${varName} < 0x200000 ? 3 : ${varName} < 0x10000000 ? 4 : 5;`;
+}
+
+function writeVarint(expr: string, ind: string): string {
     return [
         `${ind}let _v = ${expr};`,
-        `${ind}while (_v > 0x7f) { buf.push((_v & 0x7f) | 0x80); _v >>>= 7; }`,
-        `${ind}buf.push(_v & 0x7f);`,
+        `${ind}while (_v > 0x7f) { buf[offset++] = (_v & 0x7f) | 0x80; _v >>>= 7; }`,
+        `${ind}buf[offset++] = _v & 0x7f;`,
     ].join('\n');
 }
 
-/** Emit inline length-delimited write (tag + length varint + data copy). */
-function lenDelimWrite(fn: number, dataExpr: string, lenExpr: string, ind: string): string {
-    return [
-        tag(fn, 2, ind),
-        varintEnc(lenExpr, ind),
-        `${ind}for (let _i = 0; _i < ${lenExpr.replace('let _v = ', '').replace(';', '')}; _i++) buf.push(${dataExpr}[_i]);`,
-    ].join('\n');
+interface EncoderBlock {
+    declare: string[];
+    size: string[];
+    write: string[];
 }
-
-// ── public ────────────────────────────────────────────────────────────
 
 export function generateEncoder(msg: ProtobufMessage, _registry: MessageRegistry): string {
-    const L = [`function protobuf_encode_${msg.name}(obj) {`, `  const buf = [];`];
-    for (const f of msg.fields) L.push(f.isRepeated ? encRepeated(f) : encSingular(f));
-    L.push(`  return new Uint8Array(buf);`, `}`);
+    const blocks = msg.fields.map((field, index) => field.isRepeated ? buildRepeatedBlock(field, index) : buildSingularBlock(field, index));
+
+    const L = [
+        `function protobuf_encode_${msg.name}(obj) {`,
+        `  let size = 0;`,
+        ...blocks.flatMap(block => block.declare),
+        ...blocks.flatMap(block => block.size),
+        `  const buf = new Uint8Array(size);`,
+        `  let offset = 0;`,
+        ...blocks.flatMap(block => block.write),
+        `  return buf;`,
+        `}`,
+    ];
     return L.join('\n');
 }
 
-// ── singular ──────────────────────────────────────────────────────────
-
-function encSingular(f: ProtobufField): string {
-    const { name, fieldNumber: fn, typeName, wireType, isMessage } = f;
-    const I = '    '; // indent inside if
+function buildSingularBlock(field: ProtobufField, index: number): EncoderBlock {
+    const { name, fieldNumber, typeName, wireType, isMessage } = field;
+    const valueVar = `_f${index}`;
+    const cacheVar = `_c${index}`;
+    const tagLength = computeTagBytes(fieldNumber, isMessage || typeName === 'string' || typeName === 'bytes' ? 2 : wireType).length;
 
     if (isMessage) {
-        return [
-            `  if (obj.${name} != null) {`,
-            `${I}const _nested = protobuf_encode_${typeName}(obj.${name});`,
-            tag(fn, 2, I),
-            varintEnc('_nested.length', I),
-            `${I}for (let _i = 0; _i < _nested.length; _i++) buf.push(_nested[_i]);`,
-            `  }`,
-        ].join('\n');
+        return {
+            declare: [`  const ${valueVar} = obj.${name};`, `  let ${cacheVar};`],
+            size: [
+                `  if (${valueVar} != null) {`,
+                `    ${cacheVar} = protobuf_encode_${typeName}(${valueVar});`,
+                `    const _len = ${cacheVar}.length;`,
+                `    size += ${tagLength};`,
+                varintSize('_len', '    '),
+                `    size += _len;`,
+                `  }`,
+            ],
+            write: [
+                `  if (${valueVar} != null) {`,
+                `    const _data = ${cacheVar};`,
+                writeTag(fieldNumber, 2, '    '),
+                `    const _len = _data.length;`,
+                writeVarint('_len', '    '),
+                `    buf.set(_data, offset);`,
+                `    offset += _len;`,
+                `  }`,
+            ],
+        };
     }
+
     if (typeName === 'string') {
-        return [
-            `  if (obj.${name} != null && obj.${name} !== "") {`,
-            tag(fn, 2, I),
-            `${I}const _enc = __te.encode(obj.${name});`,
-            varintEnc('_enc.length', I),
-            `${I}for (let _i = 0; _i < _enc.length; _i++) buf.push(_enc[_i]);`,
-            `  }`,
-        ].join('\n');
+        return {
+            declare: [`  const ${valueVar} = obj.${name};`, `  let ${cacheVar};`],
+            size: [
+                `  if (${valueVar} != null && ${valueVar} !== "") {`,
+                `    ${cacheVar} = __utf8Len(${valueVar});`,
+                `    const _len = ${cacheVar};`,
+                `    size += ${tagLength};`,
+                varintSize('_len', '    '),
+                `    size += _len;`,
+                `  }`,
+            ],
+            write: [
+                `  if (${valueVar} != null && ${valueVar} !== "") {`,
+                writeTag(fieldNumber, 2, '    '),
+                `    const _len = ${cacheVar};`,
+                writeVarint('_len', '    '),
+                `    offset = __utf8Write(buf, offset, ${valueVar});`,
+                `  }`,
+            ],
+        };
     }
+
     if (typeName === 'bytes') {
-        return [
-            `  if (obj.${name} != null && obj.${name}.length > 0) {`,
-            tag(fn, 2, I),
-            varintEnc(`obj.${name}.length`, I),
-            `${I}for (let _i = 0; _i < obj.${name}.length; _i++) buf.push(obj.${name}[_i]);`,
-            `  }`,
-        ].join('\n');
+        return {
+            declare: [`  const ${valueVar} = obj.${name};`],
+            size: [
+                `  if (${valueVar} != null && ${valueVar}.length > 0) {`,
+                `    const _len = ${valueVar}.length;`,
+                `    size += ${tagLength};`,
+                varintSize('_len', '    '),
+                `    size += _len;`,
+                `  }`,
+            ],
+            write: [
+                `  if (${valueVar} != null && ${valueVar}.length > 0) {`,
+                writeTag(fieldNumber, 2, '    '),
+                `    const _len = ${valueVar}.length;`,
+                writeVarint('_len', '    '),
+                `    buf.set(${valueVar}, offset);`,
+                `    offset += _len;`,
+                `  }`,
+            ],
+        };
     }
+
     if (typeName === 'bool') {
-        const tb = computeTagBytes(fn, 0);
-        return `  if (obj.${name} === true) {\n${I}buf.push(${[...tb, 1].join(', ')});\n  }`;
+        return {
+            declare: [`  const ${valueVar} = obj.${name};`],
+            size: [`  if (${valueVar} === true) size += ${tagLength + 1};`],
+            write: [
+                `  if (${valueVar} === true) {`,
+                writeTag(fieldNumber, 0, '    '),
+                `    buf[offset++] = 1;`,
+                `  }`,
+            ],
+        };
     }
+
     if (wireType === WireType.Varint) {
-        return [
-            `  if (obj.${name} != null && obj.${name} !== 0) {`,
-            tag(fn, 0, I),
-            varintEnc(`obj.${name} >>> 0`, I),
-            `  }`,
-        ].join('\n');
+        return {
+            declare: [`  const ${valueVar} = obj.${name};`],
+            size: [
+                `  if (${valueVar} != null && ${valueVar} !== 0) {`,
+                `    const _val = ${valueVar} >>> 0;`,
+                `    size += ${tagLength};`,
+                varintSize('_val', '    '),
+                `  }`,
+            ],
+            write: [
+                `  if (${valueVar} != null && ${valueVar} !== 0) {`,
+                writeTag(fieldNumber, 0, '    '),
+                writeVarint(`${valueVar} >>> 0`, '    '),
+                `  }`,
+            ],
+        };
     }
+
     if (wireType === WireType.Bit32) {
-        return [
-            `  if (obj.${name} != null && obj.${name} !== 0) {`,
-            tag(fn, 5, I),
-            `${I}const _f = obj.${name};`,
-            `${I}buf.push(_f & 0xff, (_f >> 8) & 0xff, (_f >> 16) & 0xff, (_f >> 24) & 0xff);`,
-            `  }`,
-        ].join('\n');
+        return {
+            declare: [`  const ${valueVar} = obj.${name};`],
+            size: [`  if (${valueVar} != null && ${valueVar} !== 0) size += ${tagLength + 4};`],
+            write: [
+                `  if (${valueVar} != null && ${valueVar} !== 0) {`,
+                writeTag(fieldNumber, 5, '    '),
+                `    const _val = ${valueVar};`,
+                `    buf[offset++] = _val & 0xff;`,
+                `    buf[offset++] = (_val >> 8) & 0xff;`,
+                `    buf[offset++] = (_val >> 16) & 0xff;`,
+                `    buf[offset++] = (_val >> 24) & 0xff;`,
+                `  }`,
+            ],
+        };
     }
+
     if (wireType === WireType.Bit64) {
-        return [
-            `  if (obj.${name} != null && obj.${name} !== 0) {`,
-            tag(fn, 1, I),
-            `${I}const _f = obj.${name};`,
-            `${I}buf.push(_f & 0xff, (_f >> 8) & 0xff, (_f >> 16) & 0xff, (_f >> 24) & 0xff, 0, 0, 0, 0);`,
-            `  }`,
-        ].join('\n');
+        return {
+            declare: [`  const ${valueVar} = obj.${name};`],
+            size: [`  if (${valueVar} != null && ${valueVar} !== 0) size += ${tagLength + 8};`],
+            write: [
+                `  if (${valueVar} != null && ${valueVar} !== 0) {`,
+                writeTag(fieldNumber, 1, '    '),
+                `    const _val = ${valueVar};`,
+                `    buf[offset++] = _val & 0xff;`,
+                `    buf[offset++] = (_val >> 8) & 0xff;`,
+                `    buf[offset++] = (_val >> 16) & 0xff;`,
+                `    buf[offset++] = (_val >> 24) & 0xff;`,
+                `    buf[offset++] = 0;`,
+                `    buf[offset++] = 0;`,
+                `    buf[offset++] = 0;`,
+                `    buf[offset++] = 0;`,
+                `  }`,
+            ],
+        };
     }
-    return '';
+
+    return { declare: [], size: [], write: [] };
 }
 
-// ── repeated (unpacked, one tag per element) ──────────────────────────
-
-function encRepeated(f: ProtobufField): string {
-    const { name, fieldNumber: fn, typeName, wireType, isMessage } = f;
-    const I = '      '; // indent inside for
-    const arr = `obj.${name}`;
-    const el = `${arr}[_ri]`;
-
-    const body: string[] = [];
+function buildRepeatedBlock(field: ProtobufField, index: number): EncoderBlock {
+    const { name, fieldNumber, typeName, wireType, isMessage } = field;
+    const arrayVar = `_f${index}`;
+    const cacheVar = `_c${index}`;
+    const tagWireType = isMessage || typeName === 'string' || typeName === 'bytes' ? 2 : wireType;
+    const tagLength = computeTagBytes(fieldNumber, tagWireType).length;
 
     if (isMessage) {
-        body.push(
-            `${I}const _nested = protobuf_encode_${typeName}(${el});`,
-            tag(fn, 2, I),
-            varintEnc('_nested.length', I),
-            `${I}for (let _i = 0; _i < _nested.length; _i++) buf.push(_nested[_i]);`,
-        );
-    } else if (typeName === 'string') {
-        body.push(
-            tag(fn, 2, I),
-            `${I}const _enc = __te.encode(${el});`,
-            varintEnc('_enc.length', I),
-            `${I}for (let _i = 0; _i < _enc.length; _i++) buf.push(_enc[_i]);`,
-        );
-    } else if (typeName === 'bytes') {
-        body.push(
-            tag(fn, 2, I),
-            varintEnc(`${el}.length`, I),
-            `${I}for (let _i = 0; _i < ${el}.length; _i++) buf.push(${el}[_i]);`,
-        );
-    } else if (typeName === 'bool') {
-        const tb = computeTagBytes(fn, 0);
-        body.push(`${I}buf.push(${[...tb].join(', ')}, ${el} ? 1 : 0);`);
-    } else if (wireType === WireType.Varint) {
-        body.push(tag(fn, 0, I), varintEnc(`${el} >>> 0`, I));
-    } else if (wireType === WireType.Bit32) {
-        body.push(
-            tag(fn, 5, I),
-            `${I}const _f = ${el};`,
-            `${I}buf.push(_f & 0xff, (_f >> 8) & 0xff, (_f >> 16) & 0xff, (_f >> 24) & 0xff);`,
-        );
-    } else if (wireType === WireType.Bit64) {
-        body.push(
-            tag(fn, 1, I),
-            `${I}const _f = ${el};`,
-            `${I}buf.push(_f & 0xff, (_f >> 8) & 0xff, (_f >> 16) & 0xff, (_f >> 24) & 0xff, 0, 0, 0, 0);`,
-        );
+        return {
+            declare: [`  const ${arrayVar} = obj.${name};`, `  let ${cacheVar};`],
+            size: [
+                `  if (${arrayVar} != null && ${arrayVar}.length > 0) {`,
+                `    ${cacheVar} = new Array(${arrayVar}.length);`,
+                `    for (let _i = 0; _i < ${arrayVar}.length; _i++) {`,
+                `      const _data = protobuf_encode_${typeName}(${arrayVar}[_i]);`,
+                `      ${cacheVar}[_i] = _data;`,
+                `      const _len = _data.length;`,
+                `      size += ${tagLength};`,
+                varintSize('_len', '      '),
+                `      size += _len;`,
+                `    }`,
+                `  }`,
+            ],
+            write: [
+                `  if (${arrayVar} != null && ${arrayVar}.length > 0) {`,
+                `    for (let _i = 0; _i < ${arrayVar}.length; _i++) {`,
+                `      const _data = ${cacheVar}[_i];`,
+                writeTag(fieldNumber, 2, '      '),
+                `      const _len = _data.length;`,
+                writeVarint('_len', '      '),
+                `      buf.set(_data, offset);`,
+                `      offset += _len;`,
+                `    }`,
+                `  }`,
+            ],
+        };
     }
 
-    return [
-        `  if (${arr} != null && ${arr}.length > 0) {`,
-        `    for (let _ri = 0; _ri < ${arr}.length; _ri++) {`,
-        ...body,
-        `    }`,
-        `  }`,
-    ].join('\n');
+    if (typeName === 'string') {
+        return {
+            declare: [`  const ${arrayVar} = obj.${name};`, `  let ${cacheVar};`],
+            size: [
+                `  if (${arrayVar} != null && ${arrayVar}.length > 0) {`,
+                `    ${cacheVar} = new Array(${arrayVar}.length);`,
+                `    for (let _i = 0; _i < ${arrayVar}.length; _i++) {`,
+                `      const _len = __utf8Len(${arrayVar}[_i]);`,
+                `      ${cacheVar}[_i] = _len;`,
+                `      size += ${tagLength};`,
+                varintSize('_len', '      '),
+                `      size += _len;`,
+                `    }`,
+                `  }`,
+            ],
+            write: [
+                `  if (${arrayVar} != null && ${arrayVar}.length > 0) {`,
+                `    for (let _i = 0; _i < ${arrayVar}.length; _i++) {`,
+                `      const _len = ${cacheVar}[_i];`,
+                writeTag(fieldNumber, 2, '      '),
+                writeVarint('_len', '      '),
+                `      offset = __utf8Write(buf, offset, ${arrayVar}[_i]);`,
+                `    }`,
+                `  }`,
+            ],
+        };
+    }
+
+    if (typeName === 'bytes') {
+        return {
+            declare: [`  const ${arrayVar} = obj.${name};`],
+            size: [
+                `  if (${arrayVar} != null && ${arrayVar}.length > 0) {`,
+                `    for (let _i = 0; _i < ${arrayVar}.length; _i++) {`,
+                `      const _data = ${arrayVar}[_i];`,
+                `      const _len = _data.length;`,
+                `      size += ${tagLength};`,
+                varintSize('_len', '      '),
+                `      size += _len;`,
+                `    }`,
+                `  }`,
+            ],
+            write: [
+                `  if (${arrayVar} != null && ${arrayVar}.length > 0) {`,
+                `    for (let _i = 0; _i < ${arrayVar}.length; _i++) {`,
+                `      const _data = ${arrayVar}[_i];`,
+                writeTag(fieldNumber, 2, '      '),
+                `      const _len = _data.length;`,
+                writeVarint('_len', '      '),
+                `      buf.set(_data, offset);`,
+                `      offset += _len;`,
+                `    }`,
+                `  }`,
+            ],
+        };
+    }
+
+    if (typeName === 'bool') {
+        return {
+            declare: [`  const ${arrayVar} = obj.${name};`],
+            size: [`  if (${arrayVar} != null && ${arrayVar}.length > 0) size += ${arrayVar}.length * ${tagLength + 1};`],
+            write: [
+                `  if (${arrayVar} != null && ${arrayVar}.length > 0) {`,
+                `    for (let _i = 0; _i < ${arrayVar}.length; _i++) {`,
+                writeTag(fieldNumber, 0, '      '),
+                `      buf[offset++] = ${arrayVar}[_i] ? 1 : 0;`,
+                `    }`,
+                `  }`,
+            ],
+        };
+    }
+
+    if (wireType === WireType.Varint) {
+        return {
+            declare: [`  const ${arrayVar} = obj.${name};`],
+            size: [
+                `  if (${arrayVar} != null && ${arrayVar}.length > 0) {`,
+                `    for (let _i = 0; _i < ${arrayVar}.length; _i++) {`,
+                `      const _val = ${arrayVar}[_i] >>> 0;`,
+                `      size += ${tagLength};`,
+                varintSize('_val', '      '),
+                `    }`,
+                `  }`,
+            ],
+            write: [
+                `  if (${arrayVar} != null && ${arrayVar}.length > 0) {`,
+                `    for (let _i = 0; _i < ${arrayVar}.length; _i++) {`,
+                writeTag(fieldNumber, 0, '      '),
+                writeVarint(`${arrayVar}[_i] >>> 0`, '      '),
+                `    }`,
+                `  }`,
+            ],
+        };
+    }
+
+    if (wireType === WireType.Bit32) {
+        return {
+            declare: [`  const ${arrayVar} = obj.${name};`],
+            size: [`  if (${arrayVar} != null && ${arrayVar}.length > 0) size += ${arrayVar}.length * ${tagLength + 4};`],
+            write: [
+                `  if (${arrayVar} != null && ${arrayVar}.length > 0) {`,
+                `    for (let _i = 0; _i < ${arrayVar}.length; _i++) {`,
+                writeTag(fieldNumber, 5, '      '),
+                `      const _val = ${arrayVar}[_i];`,
+                `      buf[offset++] = _val & 0xff;`,
+                `      buf[offset++] = (_val >> 8) & 0xff;`,
+                `      buf[offset++] = (_val >> 16) & 0xff;`,
+                `      buf[offset++] = (_val >> 24) & 0xff;`,
+                `    }`,
+                `  }`,
+            ],
+        };
+    }
+
+    if (wireType === WireType.Bit64) {
+        return {
+            declare: [`  const ${arrayVar} = obj.${name};`],
+            size: [`  if (${arrayVar} != null && ${arrayVar}.length > 0) size += ${arrayVar}.length * ${tagLength + 8};`],
+            write: [
+                `  if (${arrayVar} != null && ${arrayVar}.length > 0) {`,
+                `    for (let _i = 0; _i < ${arrayVar}.length; _i++) {`,
+                writeTag(fieldNumber, 1, '      '),
+                `      const _val = ${arrayVar}[_i];`,
+                `      buf[offset++] = _val & 0xff;`,
+                `      buf[offset++] = (_val >> 8) & 0xff;`,
+                `      buf[offset++] = (_val >> 16) & 0xff;`,
+                `      buf[offset++] = (_val >> 24) & 0xff;`,
+                `      buf[offset++] = 0;`,
+                `      buf[offset++] = 0;`,
+                `      buf[offset++] = 0;`,
+                `      buf[offset++] = 0;`,
+                `    }`,
+                `  }`,
+            ],
+        };
+    }
+
+    return { declare: [], size: [], write: [] };
 }
