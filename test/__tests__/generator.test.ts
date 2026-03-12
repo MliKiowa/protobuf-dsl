@@ -115,6 +115,17 @@ interface BigIntMsg {
     expect(dec(enc(input))).toEqual(input);
   });
 
+  it('round-trip sint_32 with negative values', () => {
+    const schema = `
+interface Sint32Msg {
+  value: pb<1, sint_32>;
+  values: pb_repeated<2, sint_32>;
+}`;
+    const { enc, dec } = makeRoundTripFromSchema(schema, 'Sint32Msg');
+    const input = { value: -789, values: [-1, 0, 1, -789, 2147483647, -2147483648] };
+    expect(dec(enc(input))).toEqual(input);
+  });
+
   it('round-trip double as ieee754 number', () => {
     const schema = `
 interface DoubleMsg {

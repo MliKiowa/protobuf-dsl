@@ -115,6 +115,9 @@ function decodeField(field: ProtobufField, index: number): string {
         } else {
             L.push(assign(`__zigZagDecode64(_val)`));
         }
+    } else if (typeName === 'sint_32') {
+        L.push(varintDec('_val', I));
+        L.push(assign(`(_val >>> 1) ^ -(_val & 1)`));
     } else if (wireType === WireType.Varint) {
         L.push(varintDec('_val', I));
         L.push(assign(`_val >>> 0`));

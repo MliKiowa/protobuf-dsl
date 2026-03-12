@@ -200,6 +200,25 @@ function buildSingularBlock(field: ProtobufField, index: number): EncoderBlock {
         };
     }
 
+    if (typeName === 'sint_32') {
+        return {
+            declare: [`  const ${valueVar} = obj.${name};`],
+            size: [
+                `  if (${valueVar} != null && ${valueVar} !== 0) {`,
+                `    const _val = ((${valueVar} << 1) ^ (${valueVar} >> 31)) >>> 0;`,
+                `    size += ${tagLength};`,
+                varintSize('_val', '    '),
+                `  }`,
+            ],
+            write: [
+                `  if (${valueVar} != null && ${valueVar} !== 0) {`,
+                writeTag(fieldNumber, 0, '    '),
+                writeVarint(`((${valueVar} << 1) ^ (${valueVar} >> 31)) >>> 0`, '    '),
+                `  }`,
+            ],
+        };
+    }
+
     if (wireType === WireType.Varint) {
         return {
             declare: [`  const ${valueVar} = obj.${name};`],
@@ -428,6 +447,29 @@ function buildRepeatedBlock(field: ProtobufField, index: number): EncoderBlock {
                 `      const _val = ${bigintExpr};`,
                 writeTag(fieldNumber, 0, '      '),
                 `      offset = __writeVarint64(buf, offset, _val);`,
+                `    }`,
+                `  }`,
+            ],
+        };
+    }
+
+    if (typeName === 'sint_32') {
+        return {
+            declare: [`  const ${arrayVar} = obj.${name};`],
+            size: [
+                `  if (${arrayVar} != null && ${arrayVar}.length > 0) {`,
+                `    for (let _i = 0; _i < ${arrayVar}.length; _i++) {`,
+                `      const _val = ((${arrayVar}[_i] << 1) ^ (${arrayVar}[_i] >> 31)) >>> 0;`,
+                `      size += ${tagLength};`,
+                varintSize('_val', '      '),
+                `    }`,
+                `  }`,
+            ],
+            write: [
+                `  if (${arrayVar} != null && ${arrayVar}.length > 0) {`,
+                `    for (let _i = 0; _i < ${arrayVar}.length; _i++) {`,
+                writeTag(fieldNumber, 0, '      '),
+                writeVarint(`((${arrayVar}[_i] << 1) ^ (${arrayVar}[_i] >> 31)) >>> 0`, '      '),
                 `    }`,
                 `  }`,
             ],
