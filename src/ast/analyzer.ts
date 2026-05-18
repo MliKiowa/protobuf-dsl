@@ -2,23 +2,41 @@ import ts from 'typescript';
 import { WireType, PRIMITIVE_TYPE_MAP, type ProtobufMessage, type MessageRegistry, type GenericProtobufTemplate } from './types.js';
 import { collectInterface, collectGenericInterface } from './collector.js';
 import { monomorphizeTypeNode } from './monomorphizer.js';
-import { typeNodeToMangledName } from './utils.js';
+import { createImportedTypeNameResolver, typeNodeToMangledName } from './utils.js';
 import type { ImportedDefinitions } from './import-resolver.js';
+import {
+  collectProtobufImportBindings,
+  matchProtobufCallSite,
+  type CanonicalProtobufFn,
+} from './callsite.js';
+import { buildDependencyRegistry } from './dependency-graph.js';
 
 export { typeNodeToMangledName } from './utils.js';
 
 /** A recorded call-site for later replacement. */
 export interface CallSiteRecord {
-  fnName: string;            // 'protobuf_encode' | 'protobuf_decode' (canonical name)
+  fnName: CanonicalProtobufFn;
   exprStart: number;         // position of identifier start
   typeArgsEnd: number;       // position after closing '>'
   firstTypeArg: ts.TypeNode; // the type argument node
+  line: number;              // 1-based line for runtime map lookup
+  column: number;            // 1-based column for runtime map lookup
+}
+
+export interface ResolvedCallSiteRecord extends CallSiteRecord {
+  typeName: string;
 }
 
 export interface AnalysisResult {
   registry: MessageRegistry;
   callSites: CallSiteRecord[];
   sourceFile: ts.SourceFile;
+}
+
+export interface UsedRegistryResult {
+  registry: MessageRegistry;
+  roots: Set<string>;
+  callSites: ResolvedCallSiteRecord[];
 }
 
 /**
@@ -37,6 +55,8 @@ export function analyze(code: string, filePath: string, imported?: ImportedDefin
   const mono = new Map<string, ProtobufMessage>();
   const callSites: CallSiteRecord[] = [];
   const deferredTypeArgs: ts.TypeNode[] = [];
+  const importBindings = collectProtobufImportBindings(sf);
+  const resolveImportedTypeName = createImportedTypeNameResolver(sf);
 
   // Seed with imported definitions
   if (imported) {
@@ -44,50 +64,25 @@ export function analyze(code: string, filePath: string, imported?: ImportedDefin
     for (const [k, v] of imported.templates) templates.set(k, v);
   }
 
-  // ── collect import aliases for protobuf_encode / protobuf_decode ───
-  // Handles: import { protobuf_encode as enc } from 'protobuf-fastdsl'
-  const CANONICAL = new Set(['protobuf_encode', 'protobuf_decode']);
-  const aliasToCanonical = new Map<string, string>(); // localName → canonical
-  for (const stmt of sf.statements) {
-    if (!ts.isImportDeclaration(stmt) || !stmt.importClause) continue;
-    const bindings = stmt.importClause.namedBindings;
-    if (!bindings || !ts.isNamedImports(bindings)) continue;
-    for (const el of bindings.elements) {
-      const originalName = (el.propertyName ?? el.name).text;
-      if (CANONICAL.has(originalName)) {
-        aliasToCanonical.set(el.name.text, originalName);
-      }
-    }
-  }
-
   // ── single walk ─────────────────────────────────────────────────────
   ts.forEachChild(sf, function visit(node) {
     if (ts.isInterfaceDeclaration(node)) {
       if (node.typeParameters?.length) {
-        const tpl = collectGenericInterface(node, sf);
+        const tpl = collectGenericInterface(node, sf, resolveImportedTypeName);
         if (tpl) templates.set(tpl.name, tpl);
       } else {
-        const msg = collectInterface(node, sf);
+        const msg = collectInterface(node, sf, resolveImportedTypeName);
         if (msg) concrete.push(msg);
       }
     }
 
     if (ts.isCallExpression(node)) {
-      const e = node.expression;
-      if (ts.isIdentifier(e)) {
-        const canonical = CANONICAL.has(e.text) ? e.text : aliasToCanonical.get(e.text);
-        if (canonical) {
-          const ta = node.typeArguments;
-          if (ta?.length) {
-            deferredTypeArgs.push(ta[0]);
-            callSites.push({
-              fnName: canonical,
-              exprStart: e.getStart(sf),
-              typeArgsEnd: ta.end + 1,
-              firstTypeArg: ta[0],
-            });
-          }
-        }
+      const cs = matchProtobufCallSite(node, sf, importBindings, {
+        allowLegacyUnboundCanonical: true,
+      });
+      if (cs) {
+        deferredTypeArgs.push(cs.firstTypeArg);
+        callSites.push(cs);
       }
     }
 
@@ -96,7 +91,7 @@ export function analyze(code: string, filePath: string, imported?: ImportedDefin
 
   // ── post-walk: monomorphize deferred type args ──────────────────────
   for (const typeArg of deferredTypeArgs) {
-    monomorphizeTypeNode(typeArg, sf, templates, mono);
+    monomorphizeTypeNode(typeArg, sf, templates, mono, resolveImportedTypeName);
   }
   for (const m of mono.values()) concrete.push(m);
 
@@ -119,6 +114,37 @@ export function analyze(code: string, filePath: string, imported?: ImportedDefin
  */
 export function analyzeSource(code: string, filePath: string, imported?: ImportedDefinitions): MessageRegistry {
   return analyze(code, filePath, imported).registry;
+}
+
+/**
+ * Build a minimal message registry by collecting only call-site root types and
+ * their transitive message dependencies.
+ */
+export function selectUsedRegistry(
+  registry: MessageRegistry,
+  callSites: CallSiteRecord[],
+  sourceFile: ts.SourceFile,
+): UsedRegistryResult {
+  const roots = new Set<string>();
+  const resolved: ResolvedCallSiteRecord[] = [];
+  const resolveImportedTypeName = createImportedTypeNameResolver(sourceFile);
+
+  for (const cs of callSites) {
+    const typeName = typeNodeToMangledName(cs.firstTypeArg, sourceFile, resolveImportedTypeName);
+    if (!registry.has(typeName)) continue;
+    roots.add(typeName);
+    resolved.push({ ...cs, typeName });
+  }
+
+  if (roots.size === 0) {
+    return { registry: new Map(), roots, callSites: resolved };
+  }
+
+  return {
+    registry: buildDependencyRegistry(registry, roots),
+    roots,
+    callSites: resolved,
+  };
 }
 
 // ── topological sort ──────────────────────────────────────────────────

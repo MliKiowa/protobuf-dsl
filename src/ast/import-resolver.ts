@@ -2,11 +2,16 @@ import ts from 'typescript';
 import { readFileSync, existsSync } from 'fs';
 import { dirname, resolve } from 'path';
 import { collectInterface, collectGenericInterface } from './collector.js';
-import type { ProtobufMessage, GenericProtobufTemplate } from './types.js';
+import { PRIMITIVE_TYPE_MAP, type ProtobufMessage, type GenericProtobufTemplate } from './types.js';
+import { createImportedTypeNameResolver, isKeywordTypeNode, type ImportedTypeNameResolver } from './utils.js';
+import { collectProtobufImportBindings, matchProtobufCallSite } from './callsite.js';
 
 export interface ParsedFileEntry {
+    filePath: string;
     concrete: ProtobufMessage[];
     templates: Map<string, GenericProtobufTemplate>;
+    importedTypeSources: Map<string, string>;
+    resolveImportedTypeName: ImportedTypeNameResolver;
 }
 
 export interface ImportedDefinitions {
@@ -15,7 +20,7 @@ export interface ImportedDefinitions {
 }
 
 interface ImportClause {
-    names: string[];
+    importedName: string;
     specifier: string;
 }
 
@@ -29,15 +34,14 @@ function extractImports(sf: ts.SourceFile): ImportClause[] {
         const specifier = spec.text;
 
         const clause = stmt.importClause;
-        const names: string[] = [];
-
         if (clause.namedBindings && ts.isNamedImports(clause.namedBindings)) {
             for (const el of clause.namedBindings.elements) {
-                names.push(el.name.text);
+                result.push({
+                    importedName: (el.propertyName ?? el.name).text,
+                    specifier,
+                });
             }
         }
-
-        if (names.length > 0) result.push({ names, specifier });
     }
     return result;
 }
@@ -64,72 +68,147 @@ function resolveModulePath(specifier: string, importerPath: string): string | nu
 }
 
 /** Parse a file and extract its protobuf interfaces and generic templates. */
-function parseFileForDefinitions(absolutePath: string): ParsedFileEntry {
-    const code = readFileSync(absolutePath, 'utf-8');
-    const sf = ts.createSourceFile(absolutePath, code, ts.ScriptTarget.Latest, true);
+function parseFileForDefinitions(absolutePath: string, code?: string): ParsedFileEntry {
+    const sourceText = code ?? readFileSync(absolutePath, 'utf-8');
+    const sf = ts.createSourceFile(absolutePath, sourceText, ts.ScriptTarget.Latest, true);
     const concrete: ProtobufMessage[] = [];
     const templates = new Map<string, GenericProtobufTemplate>();
+    const resolveImportedTypeName = createImportedTypeNameResolver(sf);
+    const importedTypeSources = new Map<string, string>();
+
+    for (const imp of extractImports(sf)) {
+        const resolved = resolveModulePath(imp.specifier, absolutePath);
+        if (!resolved) continue;
+        importedTypeSources.set(imp.importedName, resolved);
+    }
 
     for (const stmt of sf.statements) {
         if (!ts.isInterfaceDeclaration(stmt)) continue;
         if (stmt.typeParameters?.length) {
-            const tpl = collectGenericInterface(stmt, sf);
+            const tpl = collectGenericInterface(stmt, sf, resolveImportedTypeName);
             if (tpl) templates.set(tpl.name, tpl);
         } else {
-            const msg = collectInterface(stmt, sf);
+            const msg = collectInterface(stmt, sf, resolveImportedTypeName);
             if (msg) concrete.push(msg);
         }
     }
 
-    return { concrete, templates };
+    return {
+        filePath: absolutePath,
+        concrete,
+        templates,
+        importedTypeSources,
+        resolveImportedTypeName,
+    };
+}
+
+function collectCallRootTypeNodes(sf: ts.SourceFile): ts.TypeNode[] {
+    const roots: ts.TypeNode[] = [];
+    const importBindings = collectProtobufImportBindings(sf);
+
+    ts.forEachChild(sf, function visit(node) {
+        if (ts.isCallExpression(node)) {
+            const cs = matchProtobufCallSite(node, sf, importBindings, {
+                allowLegacyUnboundCanonical: true,
+            });
+            if (cs) roots.push(cs.firstTypeArg);
+        }
+
+        ts.forEachChild(node, visit);
+    });
+
+    return roots;
 }
 
 /**
- * Recursively resolve import-type declarations from a source file.
- * Returns all protobuf interfaces and templates reachable through imports.
+ * Resolve only the import definitions reachable from protobuf call-site roots.
  */
 export function resolveImports(
     code: string,
     importerPath: string,
     cache: Map<string, ParsedFileEntry>,
 ): ImportedDefinitions {
-    const concrete: ProtobufMessage[] = [];
+    const entryPath = resolve(importerPath);
+    const entry = parseFileForDefinitions(entryPath, code);
+    const concrete = new Map<string, ProtobufMessage>();
     const templates = new Map<string, GenericProtobufTemplate>();
-    const visiting = new Set<string>();
+    const fileEntries = new Map<string, ParsedFileEntry>([[entryPath, entry]]);
+    const visitedConcrete = new Set<string>();
+    const visitedTemplates = new Set<string>();
 
-    function walk(filePath: string, fileCode?: string) {
+    function getEntry(filePath: string): ParsedFileEntry {
         const abs = resolve(filePath);
-        if (visiting.has(abs)) return; // cycle
-        visiting.add(abs);
+        const known = fileEntries.get(abs);
+        if (known) return known;
 
-        const src = fileCode ?? readFileSync(abs, 'utf-8');
-        const sf = ts.createSourceFile(abs, src, ts.ScriptTarget.Latest, true);
-        const imports = extractImports(sf);
+        let parsed = cache.get(abs);
+        if (!parsed) {
+            parsed = parseFileForDefinitions(abs);
+            cache.set(abs, parsed);
+        }
 
-        for (const imp of imports) {
-            const resolved = resolveModulePath(imp.specifier, abs);
-            if (!resolved) continue;
+        fileEntries.set(abs, parsed);
+        return parsed;
+    }
 
-            let entry = cache.get(resolved);
-            if (!entry) {
-                entry = parseFileForDefinitions(resolved);
-                cache.set(resolved, entry);
+    function resolveTypeName(typeName: string, from: ParsedFileEntry): void {
+        if (typeName in PRIMITIVE_TYPE_MAP) return;
+
+        const concreteMsg = from.concrete.find(msg => msg.name === typeName);
+        if (concreteMsg) {
+            const visitKey = `${from.filePath}:message:${typeName}`;
+            if (visitedConcrete.has(visitKey)) return;
+            visitedConcrete.add(visitKey);
+
+            if (from.filePath !== entryPath && !concrete.has(concreteMsg.name)) {
+                concrete.set(concreteMsg.name, concreteMsg);
             }
 
-            for (const msg of entry.concrete) {
-                if (!concrete.some(m => m.name === msg.name)) {
-                    concrete.push(msg);
-                }
+            for (const field of concreteMsg.fields) {
+                resolveTypeName(field.typeName, from);
             }
-            for (const [name, tpl] of entry.templates) {
-                if (!templates.has(name)) templates.set(name, tpl);
+            return;
+        }
+
+        const template = from.templates.get(typeName);
+        if (template) {
+            const visitKey = `${from.filePath}:template:${typeName}`;
+            if (visitedTemplates.has(visitKey)) return;
+            visitedTemplates.add(visitKey);
+
+            if (from.filePath !== entryPath && !templates.has(template.name)) {
+                templates.set(template.name, template);
             }
 
-            // Recurse into the imported file for transitive imports
-            walk(resolved);
+            for (const field of template.fields) {
+                if (!field.isTypeParam) resolveTypeName(field.rawTypeName, from);
+            }
+            return;
+        }
+
+        const importedPath = from.importedTypeSources.get(typeName);
+        if (!importedPath) return;
+
+        resolveTypeName(typeName, getEntry(importedPath));
+    }
+
+    function resolveTypeNode(typeNode: ts.TypeNode, from: ParsedFileEntry): void {
+        if (isKeywordTypeNode(typeNode)) return;
+        if (!ts.isTypeReferenceNode(typeNode) || !ts.isIdentifier(typeNode.typeName)) return;
+
+        const typeName = from.resolveImportedTypeName(typeNode.typeName.text);
+        resolveTypeName(typeName, from);
+
+        if (!typeNode.typeArguments?.length) return;
+        for (const typeArg of typeNode.typeArguments) {
+            resolveTypeNode(typeArg, from);
         }
     }
 
-    walk(importerPath, code);
-    return { concrete, templates };
+    const rootTypeNodes = collectCallRootTypeNodes(ts.createSourceFile(entryPath, code, ts.ScriptTarget.Latest, true));
+    for (const rootTypeNode of rootTypeNodes) {
+        resolveTypeNode(rootTypeNode, entry);
+    }
+
+    return { concrete: [...concrete.values()], templates };
 }

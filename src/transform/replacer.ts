@@ -1,6 +1,7 @@
 import type { MessageRegistry } from '../ast/types.js';
 import type { CallSiteRecord } from '../ast/analyzer.js';
-import { typeNodeToMangledName } from '../ast/utils.js';
+import { createImportedTypeNameResolver, typeNodeToMangledName } from '../ast/utils.js';
+import { collectProtobufImportBindings, matchProtobufCallSite } from '../ast/callsite.js';
 import ts from 'typescript';
 
 interface TextEdit { start: number; end: number; replacement: string }
@@ -16,9 +17,10 @@ export function applyReplacements(
   registry: MessageRegistry,
 ): { transformedCode: string; hasReplacements: boolean } {
   const edits: TextEdit[] = [];
+  const resolveImportedTypeName = createImportedTypeNameResolver(sf);
 
   for (const cs of callSites) {
-    const mangled = typeNodeToMangledName(cs.firstTypeArg, sf);
+    const mangled = typeNodeToMangledName(cs.firstTypeArg, sf, resolveImportedTypeName);
     if (registry.has(mangled)) {
       edits.push({
         start: cs.exprStart,
@@ -43,39 +45,14 @@ export function applyReplacements(
 export function replaceCallSites(code: string, registry: MessageRegistry): { transformedCode: string; hasReplacements: boolean } {
   const sf = ts.createSourceFile('input.ts', code, ts.ScriptTarget.Latest, true);
   const callSites: CallSiteRecord[] = [];
-
-  // Collect import aliases
-  const CANONICAL = new Set(['protobuf_encode', 'protobuf_decode']);
-  const aliasToCanonical = new Map<string, string>();
-  for (const stmt of sf.statements) {
-    if (!ts.isImportDeclaration(stmt) || !stmt.importClause) continue;
-    const bindings = stmt.importClause.namedBindings;
-    if (!bindings || !ts.isNamedImports(bindings)) continue;
-    for (const el of bindings.elements) {
-      const originalName = (el.propertyName ?? el.name).text;
-      if (CANONICAL.has(originalName)) {
-        aliasToCanonical.set(el.name.text, originalName);
-      }
-    }
-  }
+  const importBindings = collectProtobufImportBindings(sf);
 
   ts.forEachChild(sf, function visit(node) {
     if (ts.isCallExpression(node)) {
-      const e = node.expression;
-      if (ts.isIdentifier(e)) {
-        const canonical = CANONICAL.has(e.text) ? e.text : aliasToCanonical.get(e.text);
-        if (canonical) {
-          const ta = node.typeArguments;
-          if (ta?.length) {
-            callSites.push({
-              fnName: canonical,
-              exprStart: e.getStart(sf),
-              typeArgsEnd: ta.end + 1,
-              firstTypeArg: ta[0],
-            });
-          }
-        }
-      }
+      const cs = matchProtobufCallSite(node, sf, importBindings, {
+        allowLegacyUnboundCanonical: true,
+      });
+      if (cs) callSites.push(cs);
     }
     ts.forEachChild(node, visit);
   });

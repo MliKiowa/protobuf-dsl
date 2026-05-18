@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'fs';
 import { resolve, dirname } from 'path';
 import { fileURLToPath } from 'url';
-import { analyze, analyzeSource } from '../../src/ast/analyzer';
+import { analyze, analyzeSource, selectUsedRegistry } from '../../src/ast/analyzer';
 import { generateCode } from '../../src/codegen/generator';
 import { applyReplacements } from '../../src/transform/replacer';
 import { resolveImports, type ParsedFileEntry } from '../../src/ast/import-resolver';
@@ -168,6 +168,24 @@ describe('cross-file import resolution', () => {
         expect(imported.templates.size).toBe(0);
     });
 
+    it('only resolves imports reachable from protobuf call roots', () => {
+        const code = `
+import { protobuf_encode } from 'protobuf-fastdsl';
+import type { UserMsg } from './types';
+import type { Inner } from './inner';
+
+const buf = protobuf_encode<UserMsg>({ id: 42, name: 'alice' });
+`;
+        const fakePath = resolve(crossDir, 'on-demand.ts');
+        const cache = new Map<string, ParsedFileEntry>();
+
+        const imported = resolveImports(code, fakePath, cache);
+
+        expect(imported.concrete.map(m => m.name)).toEqual(['UserMsg']);
+        expect(cache.has(resolve(crossDir, 'types.ts'))).toBe(true);
+        expect(cache.has(resolve(crossDir, 'inner.ts'))).toBe(false);
+    });
+
     // ── Value import (non-type import) ───────────────────────────────
 
     it('resolves value import { SimpleMessage } (not import type)', () => {
@@ -199,5 +217,27 @@ describe('cross-file import resolution', () => {
             globalThis.__r = protobuf_decode_SimpleMessage(enc);
         `, '__r');
         expect(result.id).toBe(42);
+    });
+
+    it('canonicalizes imported type aliases to the original message name', () => {
+        const { code, path } = loadCross('aliased-consumer.ts');
+        const cache = new Map<string, ParsedFileEntry>();
+        const imported = resolveImports(code, path, cache);
+
+        const { registry, callSites, sourceFile } = analyze(code, path, imported);
+        const used = selectUsedRegistry(registry, callSites, sourceFile);
+
+        expect(used.registry.has('UserMsg')).toBe(true);
+        expect(used.registry.has('AliasMsg')).toBe(false);
+        expect(used.callSites).toHaveLength(2);
+        expect(used.callSites[0].typeName).toBe('UserMsg');
+        expect(used.callSites[1].typeName).toBe('UserMsg');
+
+        const { transformedCode, hasReplacements } = applyReplacements(code, sourceFile, callSites, used.registry);
+        expect(hasReplacements).toBe(true);
+        expect(transformedCode).toContain('protobuf_encode_UserMsg(');
+        expect(transformedCode).toContain('protobuf_decode_UserMsg(');
+        expect(transformedCode).not.toContain('protobuf_encode_AliasMsg(');
+        expect(transformedCode).not.toContain('protobuf_decode_AliasMsg(');
     });
 });

@@ -5,27 +5,39 @@ import {
     type ProtobufField, type ProtobufMessage,
     type GenericProtobufTemplate, type GenericFieldTemplate,
 } from './types.js';
-import { isKeywordTypeNode } from './utils.js';
+import { isKeywordTypeNode, type ImportedTypeNameResolver } from './utils.js';
+
+function identityImportedTypeName(name: string): string {
+    return name;
+}
 
 /** Collect a concrete (non-generic) interface with pb<>/pb_repeated<> fields. */
-export function collectInterface(node: ts.InterfaceDeclaration, sf: ts.SourceFile): ProtobufMessage | null {
+export function collectInterface(
+    node: ts.InterfaceDeclaration,
+    sf: ts.SourceFile,
+    resolveImportedTypeName: ImportedTypeNameResolver = identityImportedTypeName,
+): ProtobufMessage | null {
     const fields: ProtobufField[] = [];
     for (const m of node.members) {
         if (!ts.isPropertySignature(m) || !m.type) continue;
-        const f = extractField(m, sf);
+        const f = extractField(m, sf, resolveImportedTypeName);
         if (f) fields.push(f);
     }
     return fields.length ? { name: node.name.text, fields } : null;
 }
 
 /** Collect a generic interface template. */
-export function collectGenericInterface(node: ts.InterfaceDeclaration, sf: ts.SourceFile): GenericProtobufTemplate | null {
+export function collectGenericInterface(
+    node: ts.InterfaceDeclaration,
+    sf: ts.SourceFile,
+    resolveImportedTypeName: ImportedTypeNameResolver = identityImportedTypeName,
+): GenericProtobufTemplate | null {
     const typeParams = node.typeParameters!.map(p => p.name.text);
     const tpSet = new Set(typeParams);
     const fields: GenericFieldTemplate[] = [];
     for (const m of node.members) {
         if (!ts.isPropertySignature(m) || !m.type) continue;
-        const f = extractGenericField(m, sf, tpSet);
+        const f = extractGenericField(m, sf, tpSet, resolveImportedTypeName);
         if (f) fields.push(f);
     }
     return fields.length ? { name: node.name.text, typeParams, fields } : null;
@@ -45,16 +57,26 @@ function parsePbTypeRef(member: ts.PropertySignature): { marker: string; fieldNu
     return { marker, fieldNumber: Number(fnNode.literal.text), typeArgNode: ta[1] };
 }
 
-function resolveTypeName(node: ts.TypeNode, sf: ts.SourceFile): string | null {
-    if (ts.isTypeReferenceNode(node) && ts.isIdentifier(node.typeName)) return node.typeName.text;
+function resolveTypeName(
+    node: ts.TypeNode,
+    sf: ts.SourceFile,
+    resolveImportedTypeName: ImportedTypeNameResolver,
+): string | null {
+    if (ts.isTypeReferenceNode(node) && ts.isIdentifier(node.typeName)) {
+        return resolveImportedTypeName(node.typeName.text);
+    }
     if (isKeywordTypeNode(node)) return node.getText(sf);
     return null;
 }
 
-function extractField(member: ts.PropertySignature, sf: ts.SourceFile): ProtobufField | null {
+function extractField(
+    member: ts.PropertySignature,
+    sf: ts.SourceFile,
+    resolveImportedTypeName: ImportedTypeNameResolver,
+): ProtobufField | null {
     const parsed = parsePbTypeRef(member);
     if (!parsed) return null;
-    const typeName = resolveTypeName(parsed.typeArgNode, sf);
+    const typeName = resolveTypeName(parsed.typeArgNode, sf, resolveImportedTypeName);
     if (!typeName || !ts.isIdentifier(member.name)) return null;
     return {
         name: (member.name as ts.Identifier).text,
@@ -67,15 +89,20 @@ function extractField(member: ts.PropertySignature, sf: ts.SourceFile): Protobuf
     };
 }
 
-function extractGenericField(member: ts.PropertySignature, sf: ts.SourceFile, tpSet: Set<string>): GenericFieldTemplate | null {
+function extractGenericField(
+    member: ts.PropertySignature,
+    sf: ts.SourceFile,
+    tpSet: Set<string>,
+    resolveImportedTypeName: ImportedTypeNameResolver,
+): GenericFieldTemplate | null {
     const parsed = parsePbTypeRef(member);
     if (!parsed) return null;
-    const raw = resolveTypeName(parsed.typeArgNode, sf);
+    const raw = resolveTypeName(parsed.typeArgNode, sf, resolveImportedTypeName);
     if (!raw || !ts.isIdentifier(member.name)) return null;
     return {
         name: (member.name as ts.Identifier).text,
         fieldNumber: parsed.fieldNumber,
-        rawTypeName: raw,
+        rawTypeName: tpSet.has(raw) ? raw : resolveImportedTypeName(raw),
         isTypeParam: tpSet.has(raw),
         isOptional: member.questionToken != null,
         isRepeated: parsed.marker === PB_REPEATED_MARKER,

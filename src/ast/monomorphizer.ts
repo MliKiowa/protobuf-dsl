@@ -1,6 +1,10 @@
 import ts from 'typescript';
 import { WireType, type ProtobufField, type ProtobufMessage, type GenericProtobufTemplate } from './types.js';
-import { isKeywordTypeNode, typeNodeToMangledName } from './utils.js';
+import { isKeywordTypeNode, type ImportedTypeNameResolver, typeNodeToMangledName } from './utils.js';
+
+function identityImportedTypeName(name: string): string {
+    return name;
+}
 
 /**
  * Recursively monomorphize a generic type instantiation into concrete ProtobufMessages.
@@ -12,23 +16,24 @@ export function monomorphizeTypeNode(
     sf: ts.SourceFile,
     templates: Map<string, GenericProtobufTemplate>,
     out: Map<string, ProtobufMessage>,
+    resolveImportedTypeName: ImportedTypeNameResolver = identityImportedTypeName,
 ): string | null {
     if (!ts.isTypeReferenceNode(typeNode) || !ts.isIdentifier(typeNode.typeName)) return null;
 
-    const baseName = typeNode.typeName.text;
+    const baseName = resolveImportedTypeName(typeNode.typeName.text);
     const typeArgs = typeNode.typeArguments;
     if (!typeArgs || typeArgs.length === 0) return baseName; // already concrete
 
     const tpl = templates.get(baseName);
     if (!tpl || typeArgs.length !== tpl.typeParams.length) return null;
 
-    const mangledName = typeNodeToMangledName(typeNode, sf);
+    const mangledName = typeNodeToMangledName(typeNode, sf, resolveImportedTypeName);
     if (out.has(mangledName)) return mangledName; // already done
 
     // Resolve each type parameter → concrete type name
     const paramMap = new Map<string, string>();
     for (let i = 0; i < tpl.typeParams.length; i++) {
-        const resolved = resolveTypeArg(typeArgs[i], sf, templates, out);
+        const resolved = resolveTypeArg(typeArgs[i], sf, templates, out, resolveImportedTypeName);
         if (!resolved) return null;
         paramMap.set(tpl.typeParams[i], resolved);
     }
@@ -53,15 +58,16 @@ function resolveTypeArg(
     sf: ts.SourceFile,
     templates: Map<string, GenericProtobufTemplate>,
     out: Map<string, ProtobufMessage>,
+    resolveImportedTypeName: ImportedTypeNameResolver,
 ): string | null {
     // Try recursive monomorphization first (handles nested generics)
-    const mono = monomorphizeTypeNode(node, sf, templates, out);
+    const mono = monomorphizeTypeNode(node, sf, templates, out, resolveImportedTypeName);
     if (mono) return mono;
     // Keyword type (string, number, …)
     if (isKeywordTypeNode(node)) return node.getText(sf);
     // Simple identifier (uint_32, SomeMsg, …)
     if (ts.isTypeReferenceNode(node) && ts.isIdentifier(node.typeName) && !node.typeArguments) {
-        return node.typeName.text;
+        return resolveImportedTypeName(node.typeName.text);
     }
     return null;
 }

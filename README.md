@@ -33,6 +33,23 @@ export default defineConfig({
 });
 ```
 
+可选地，你可以开启 runtime map 产物（默认关闭）：
+
+```ts
+import protobufPlugin from 'protobuf-fastdsl/vite';
+
+export default defineConfig({
+  plugins: [
+    protobufPlugin({
+      runtimeMap: {
+        enabled: true,
+        fileName: 'protobuf-fastdsl.runtime-map.json',
+      },
+    }),
+  ],
+});
+```
+
 **2. 定义 protobuf schema（TypeScript 接口）：**
 
 ```ts
@@ -74,6 +91,17 @@ const user = protobuf_decode_UserProfile(bytes);
 
 如果忘记配置插件，`protobuf_encode` / `protobuf_decode` 会在运行时抛出错误提示。
 
+如果你在构建阶段启用了 `runtimeMap`，也可以在**非 Vite 运行场景**下显式启用 map 回退（默认关闭）：
+
+```ts
+import runtimeMap from './protobuf-fastdsl.runtime-map.json';
+import { protobuf_enableRuntimeMapFallback } from 'protobuf-fastdsl';
+
+protobuf_enableRuntimeMapFallback(runtimeMap);
+```
+
+该回退模式会根据调用栈命中 call-site map，再按需动态生成对应类型及其依赖消息的编解码函数。
+
 ## 跨文件类型引用
 
 接口定义和编解码调用可以在不同文件中，插件会自动跟踪 import 链：
@@ -107,6 +135,15 @@ import { protobuf_encode as encode, protobuf_decode as decode } from 'protobuf-f
 
 const bytes = encode<UserProfile>(data);  // → protobuf_encode_UserProfile(data)
 const user = decode<UserProfile>(bytes);  // → protobuf_decode_UserProfile(bytes)
+```
+
+也支持 namespace 形式：
+
+```ts
+import * as pb from 'protobuf-fastdsl';
+
+const bytes = pb.protobuf_encode<UserProfile>(data);
+const user = pb.protobuf_decode<UserProfile>(bytes);
 ```
 
 ## 泛型单态化

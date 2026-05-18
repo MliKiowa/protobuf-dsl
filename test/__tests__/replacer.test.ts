@@ -61,4 +61,34 @@ const b = protobuf_decode<SimpleMsg>(a);
     expect(transformedCode).toContain('protobuf_encode_TestProtobufAny__TestProtobufAny__string');
     expect(transformedCode).toContain('protobuf_decode_TestProtobufAny__TestProtobufAny__string');
   });
+
+  it('replaces namespace import calls', () => {
+    const code = `
+import * as pbx from 'protobuf-fastdsl';
+
+interface Msg { id: pb<1, uint_32>; }
+
+const a = pbx.protobuf_encode<Msg>({ id: 1 });
+const b = pbx.protobuf_decode<Msg>(a);
+`;
+    const registry = analyzeSource(code, 'ns.ts');
+    const { transformedCode, hasReplacements } = replaceCallSites(code, registry);
+    expect(hasReplacements).toBe(true);
+    expect(transformedCode).toContain('const a = protobuf_encode_Msg({ id: 1 });');
+    expect(transformedCode).toContain('const b = protobuf_decode_Msg(a);');
+  });
+
+  it('does not replace same-name imports from non-runtime modules', () => {
+    const code = `
+import { protobuf_encode } from './other';
+
+interface Msg { id: pb<1, uint_32>; }
+
+const a = protobuf_encode<Msg>({ id: 1 });
+`;
+    const registry = analyzeSource(code, 'guard.ts');
+    const { transformedCode, hasReplacements } = replaceCallSites(code, registry);
+    expect(hasReplacements).toBe(false);
+    expect(transformedCode).toContain('protobuf_encode<Msg>({ id: 1 })');
+  });
 });
