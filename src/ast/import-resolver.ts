@@ -4,7 +4,15 @@ import { dirname, resolve } from 'path';
 import { collectInterface, collectGenericInterface } from './collector.js';
 import { PRIMITIVE_TYPE_MAP, type ProtobufMessage, type GenericProtobufTemplate } from './types.js';
 import { createImportedTypeNameResolver, isKeywordTypeNode, type ImportedTypeNameResolver } from './utils.js';
-import { collectProtobufImportBindings, matchProtobufCallSite } from './callsite.js';
+import { collectProtobufImportBindings, matchProtobufCallSite, type CanonicalProtobufFn } from './callsite.js';
+
+export interface WrapperBinding {
+    fnName: CanonicalProtobufFn;
+    typeArgIndex: number;
+    typePattern?: string;
+    typeParamNames?: string[];
+    sourceFilePath?: string;
+}
 
 export interface ParsedFileEntry {
     filePath: string;
@@ -12,16 +20,25 @@ export interface ParsedFileEntry {
     templates: Map<string, GenericProtobufTemplate>;
     importedTypeSources: Map<string, string>;
     resolveImportedTypeName: ImportedTypeNameResolver;
+    exportedWrappers: Map<string, WrapperBinding>;
 }
 
 export interface ImportedDefinitions {
     concrete: ProtobufMessage[];
     templates: Map<string, GenericProtobufTemplate>;
+    wrapperBindings: Map<string, WrapperBinding>;
 }
 
 interface ImportClause {
     importedName: string;
+    localName: string;
     specifier: string;
+}
+
+function getCallableName(expr: ts.Expression): string | null {
+    if (ts.isIdentifier(expr)) return expr.text;
+    if (ts.isPropertyAccessExpression(expr)) return expr.name.text;
+    return null;
 }
 
 /** Extract all named imports from the source file (both type and value imports). */
@@ -38,6 +55,7 @@ function extractImports(sf: ts.SourceFile): ImportClause[] {
             for (const el of clause.namedBindings.elements) {
                 result.push({
                     importedName: (el.propertyName ?? el.name).text,
+                    localName: el.name.text,
                     specifier,
                 });
             }
@@ -67,6 +85,244 @@ function resolveModulePath(specifier: string, importerPath: string): string | nu
     return null;
 }
 
+function hasExportModifier(node: ts.Node): boolean {
+    return ts.canHaveModifiers(node) && !!ts.getModifiers(node)?.some(m => m.kind === ts.SyntaxKind.ExportKeyword);
+}
+
+function matchForwardedProtobufFn(
+    body: ts.ConciseBody | ts.Block | undefined,
+    sf: ts.SourceFile,
+    typeParams: readonly ts.TypeParameterDeclaration[] | undefined,
+): WrapperBinding | null {
+    if (!body || !typeParams?.length) return null;
+    const typeParamIndexes = new Map(typeParams.map((p, index) => [p.name.text, index]));
+    const typeParamNames = typeParams.map(p => p.name.text);
+    const bindings = collectProtobufImportBindings(sf);
+    let found: WrapperBinding | null = null;
+
+    function visit(node: ts.Node): void {
+        if (found) return;
+        if (ts.isCallExpression(node)) {
+            const cs = matchProtobufCallSite(node, sf, bindings, {
+                allowLegacyUnboundCanonical: true,
+            });
+            if (
+                cs &&
+                ts.isTypeReferenceNode(cs.firstTypeArg) &&
+                ts.isIdentifier(cs.firstTypeArg.typeName) &&
+                typeParamIndexes.has(cs.firstTypeArg.typeName.text)
+            ) {
+                found = {
+                    fnName: cs.fnName,
+                    typeArgIndex: typeParamIndexes.get(cs.firstTypeArg.typeName.text)!,
+                    sourceFilePath: sf.fileName,
+                };
+                return;
+            }
+
+            if (cs && containsTypeParameter(cs.firstTypeArg, typeParamIndexes)) {
+                found = {
+                    fnName: cs.fnName,
+                    typeArgIndex: firstTypeParameterIndex(cs.firstTypeArg, typeParamIndexes) ?? 0,
+                    typePattern: cs.firstTypeArg.getText(sf),
+                    typeParamNames,
+                    sourceFilePath: sf.fileName,
+                };
+                return;
+            }
+        }
+        ts.forEachChild(node, visit);
+    }
+
+    visit(body);
+    return found;
+}
+
+function containsTypeParameter(typeNode: ts.TypeNode, typeParamIndexes: Map<string, number>): boolean {
+    let found = false;
+    function visit(node: ts.Node): void {
+        if (found) return;
+        if (ts.isTypeReferenceNode(node) && ts.isIdentifier(node.typeName) && typeParamIndexes.has(node.typeName.text)) {
+            found = true;
+            return;
+        }
+        ts.forEachChild(node, visit);
+    }
+    visit(typeNode);
+    return found;
+}
+
+function firstTypeParameterIndex(typeNode: ts.TypeNode, typeParamIndexes: Map<string, number>): number | null {
+    let index: number | null = null;
+    function visit(node: ts.Node): void {
+        if (index !== null) return;
+        if (ts.isTypeReferenceNode(node) && ts.isIdentifier(node.typeName) && typeParamIndexes.has(node.typeName.text)) {
+            index = typeParamIndexes.get(node.typeName.text)!;
+            return;
+        }
+        ts.forEachChild(node, visit);
+    }
+    visit(typeNode);
+    return index;
+}
+
+function instantiateWrapperTypePattern(
+    binding: WrapperBinding,
+    callerTypeArgs: ts.NodeArray<ts.TypeNode>,
+    sf: ts.SourceFile,
+): ts.TypeNode | null {
+    if (!binding.typePattern || !binding.typeParamNames?.length) return callerTypeArgs[binding.typeArgIndex] ?? null;
+
+    let text = binding.typePattern;
+    for (let i = 0; i < binding.typeParamNames.length; i++) {
+        const arg = callerTypeArgs[i];
+        if (!arg) return null;
+        text = text.replace(new RegExp(`\\b${binding.typeParamNames[i]}\\b`, 'g'), arg.getText(sf));
+    }
+
+    const parsed = ts.createSourceFile('wrapper-type.ts', `type __T = ${text};`, ts.ScriptTarget.Latest, true);
+    const stmt = parsed.statements[0];
+    if (!ts.isTypeAliasDeclaration(stmt)) return null;
+    return stmt.type;
+}
+
+function matchForwardedKnownWrapper(
+    body: ts.ConciseBody | ts.Block | undefined,
+    typeParams: readonly ts.TypeParameterDeclaration[] | undefined,
+    knownWrappers: Map<string, WrapperBinding>,
+): WrapperBinding | null {
+    if (!body || !typeParams?.length) return null;
+    const typeParamIndexes = new Map(typeParams.map((p, index) => [p.name.text, index]));
+    let found: WrapperBinding | null = null;
+
+    function visit(node: ts.Node): void {
+        if (found) return;
+        if (ts.isCallExpression(node) && node.typeArguments?.length) {
+            const callableName = getCallableName(node.expression);
+            const wrapper = callableName ? knownWrappers.get(callableName) : undefined;
+            const forwardedTypeArg = wrapper ? node.typeArguments[wrapper.typeArgIndex] : undefined;
+            if (
+                wrapper &&
+                forwardedTypeArg &&
+                ts.isTypeReferenceNode(forwardedTypeArg) &&
+                ts.isIdentifier(forwardedTypeArg.typeName) &&
+                !forwardedTypeArg.typeArguments?.length &&
+                typeParamIndexes.has(forwardedTypeArg.typeName.text)
+            ) {
+                found = {
+                    fnName: wrapper.fnName,
+                    typeArgIndex: typeParamIndexes.get(forwardedTypeArg.typeName.text)!,
+                };
+                return;
+            }
+        }
+
+        ts.forEachChild(node, visit);
+    }
+
+    visit(body);
+    return found;
+}
+
+function collectWrapperCandidates(
+    sf: ts.SourceFile,
+    exportedOnly: boolean,
+): Array<{ name: string; body: ts.ConciseBody | ts.Block | undefined; typeParameters: readonly ts.TypeParameterDeclaration[] | undefined }> {
+    const candidates: Array<{ name: string; body: ts.ConciseBody | ts.Block | undefined; typeParameters: readonly ts.TypeParameterDeclaration[] | undefined }> = [];
+
+    for (const stmt of sf.statements) {
+        if (ts.isFunctionDeclaration(stmt) && stmt.name && (!exportedOnly || hasExportModifier(stmt))) {
+            candidates.push({ name: stmt.name.text, body: stmt.body, typeParameters: stmt.typeParameters });
+            continue;
+        }
+
+        if (!ts.isVariableStatement(stmt) || (exportedOnly && !hasExportModifier(stmt))) continue;
+        for (const decl of stmt.declarationList.declarations) {
+            if (!ts.isIdentifier(decl.name) || !decl.initializer) continue;
+            const init = decl.initializer;
+            if (ts.isArrowFunction(init) || ts.isFunctionExpression(init)) {
+                candidates.push({ name: decl.name.text, body: init.body, typeParameters: init.typeParameters });
+                continue;
+            }
+
+            if (ts.isObjectLiteralExpression(init)) {
+                for (const prop of init.properties) {
+                    if (ts.isPropertyAssignment(prop)) {
+                        const propName = ts.isIdentifier(prop.name) || ts.isStringLiteral(prop.name) ? prop.name.text : null;
+                        const propInit = prop.initializer;
+                        if (propName && (ts.isArrowFunction(propInit) || ts.isFunctionExpression(propInit))) {
+                            candidates.push({ name: propName, body: propInit.body, typeParameters: propInit.typeParameters });
+                        }
+                        continue;
+                    }
+
+                    if (ts.isMethodDeclaration(prop)) {
+                        const propName = ts.isIdentifier(prop.name) || ts.isStringLiteral(prop.name) ? prop.name.text : null;
+                        if (propName) candidates.push({ name: propName, body: prop.body, typeParameters: prop.typeParameters });
+                    }
+                }
+            }
+        }
+    }
+
+    return candidates;
+}
+
+function collectWrappers(sf: ts.SourceFile, exportedOnly: boolean): Map<string, WrapperBinding> {
+    const wrappers = new Map<string, WrapperBinding>();
+    const localWrapperMembers = new Map<string, Map<string, WrapperBinding>>();
+    const candidates = collectWrapperCandidates(sf, exportedOnly);
+
+    for (const candidate of candidates) {
+        const fn = matchForwardedProtobufFn(candidate.body, sf, candidate.typeParameters);
+        if (fn) wrappers.set(candidate.name, fn);
+    }
+
+    for (const candidate of candidates) {
+        if (wrappers.has(candidate.name)) continue;
+        const fn = matchForwardedKnownWrapper(candidate.body, candidate.typeParameters, wrappers);
+        if (fn) wrappers.set(candidate.name, fn);
+    }
+
+    for (const stmt of sf.statements) {
+        if (!ts.isVariableStatement(stmt) || (exportedOnly && !hasExportModifier(stmt))) continue;
+        for (const decl of stmt.declarationList.declarations) {
+            if (!ts.isIdentifier(decl.name) || !decl.initializer) continue;
+            const init = decl.initializer;
+            if (ts.isObjectLiteralExpression(init)) {
+                const memberWrappers = new Map<string, WrapperBinding>();
+                for (const prop of init.properties) {
+                    if (!('name' in prop) || !prop.name) continue;
+                    const propName = ts.isIdentifier(prop.name) || ts.isStringLiteral(prop.name) ? prop.name.text : null;
+                    if (!propName) continue;
+                    const fn = wrappers.get(propName);
+                    if (fn) {
+                        memberWrappers.set(propName, fn);
+                    }
+                }
+                if (memberWrappers.size) localWrapperMembers.set(decl.name.text, memberWrappers);
+            }
+        }
+    }
+
+    for (const stmt of sf.statements) {
+        if (exportedOnly || !ts.isVariableStatement(stmt)) continue;
+        for (const decl of stmt.declarationList.declarations) {
+            if (!ts.isIdentifier(decl.name) || !decl.initializer || !ts.isPropertyAccessExpression(decl.initializer)) continue;
+            if (!ts.isIdentifier(decl.initializer.expression)) continue;
+            const memberWrappers = localWrapperMembers.get(decl.initializer.expression.text);
+            const fn = memberWrappers?.get(decl.initializer.name.text);
+            if (fn) wrappers.set(decl.name.text, fn);
+        }
+    }
+
+    return wrappers;
+}
+
+function collectExportedWrappers(sf: ts.SourceFile): Map<string, WrapperBinding> {
+    return collectWrappers(sf, true);
+}
+
 /** Parse a file and extract its protobuf interfaces and generic templates. */
 function parseFileForDefinitions(absolutePath: string, code?: string): ParsedFileEntry {
     const sourceText = code ?? readFileSync(absolutePath, 'utf-8');
@@ -75,11 +331,13 @@ function parseFileForDefinitions(absolutePath: string, code?: string): ParsedFil
     const templates = new Map<string, GenericProtobufTemplate>();
     const resolveImportedTypeName = createImportedTypeNameResolver(sf);
     const importedTypeSources = new Map<string, string>();
+    const exportedWrappers = collectExportedWrappers(sf);
 
     for (const imp of extractImports(sf)) {
         const resolved = resolveModulePath(imp.specifier, absolutePath);
         if (!resolved) continue;
         importedTypeSources.set(imp.importedName, resolved);
+        importedTypeSources.set(imp.localName, resolved);
     }
 
     for (const stmt of sf.statements) {
@@ -99,6 +357,7 @@ function parseFileForDefinitions(absolutePath: string, code?: string): ParsedFil
         templates,
         importedTypeSources,
         resolveImportedTypeName,
+        exportedWrappers,
     };
 }
 
@@ -120,6 +379,11 @@ function collectCallRootTypeNodes(sf: ts.SourceFile): ts.TypeNode[] {
     return roots;
 }
 
+interface RootTypeNode {
+    typeNode: ts.TypeNode;
+    from: ParsedFileEntry;
+}
+
 /**
  * Resolve only the import definitions reachable from protobuf call-site roots.
  */
@@ -135,6 +399,7 @@ export function resolveImports(
     const fileEntries = new Map<string, ParsedFileEntry>([[entryPath, entry]]);
     const visitedConcrete = new Set<string>();
     const visitedTemplates = new Set<string>();
+    const importedObjectWrapperMembers = new Map<string, Map<string, WrapperBinding>>();
 
     function getEntry(filePath: string): ParsedFileEntry {
         const abs = resolve(filePath);
@@ -149,6 +414,50 @@ export function resolveImports(
 
         fileEntries.set(abs, parsed);
         return parsed;
+    }
+
+    function collectCalledGenericIdentifiers(sf: ts.SourceFile): Set<string> {
+        const names = new Set<string>();
+
+        ts.forEachChild(sf, function visit(node) {
+            if (ts.isCallExpression(node) && node.typeArguments?.length) {
+                const callableName = getCallableName(node.expression);
+                if (callableName) names.add(callableName);
+            }
+
+            ts.forEachChild(node, visit);
+        });
+
+        return names;
+    }
+
+    function collectWrapperBindings(from: ParsedFileEntry, sf: ts.SourceFile): Map<string, WrapperBinding> {
+        const bindings = new Map<string, WrapperBinding>();
+        const localWrappers = from.filePath === entryPath ? collectWrappers(sf, false) : from.exportedWrappers;
+        for (const [name, fn] of localWrappers) bindings.set(name, fn);
+
+        const calledGenericIdentifiers = collectCalledGenericIdentifiers(sf);
+        for (const imp of extractImports(sf)) {
+            if (!calledGenericIdentifiers.has(imp.localName)) continue;
+            const resolved = resolveModulePath(imp.specifier, from.filePath);
+            if (!resolved) continue;
+            const wrapperFn = getEntry(resolved).exportedWrappers.get(imp.importedName);
+            if (wrapperFn) bindings.set(imp.localName, wrapperFn);
+
+            const importedEntry = getEntry(resolved);
+            const memberNames = [...importedEntry.exportedWrappers.keys()].filter(name => calledGenericIdentifiers.has(name));
+            if (memberNames.length) {
+                const members = new Map<string, WrapperBinding>();
+                for (const name of memberNames) {
+                    const memberBinding = importedEntry.exportedWrappers.get(name)!;
+                    members.set(name, memberBinding);
+                    bindings.set(name, memberBinding);
+                }
+                importedObjectWrapperMembers.set(imp.localName, members);
+            }
+        }
+
+        return bindings;
     }
 
     function resolveTypeName(typeName: string, from: ParsedFileEntry): void {
@@ -205,10 +514,49 @@ export function resolveImports(
         }
     }
 
-    const rootTypeNodes = collectCallRootTypeNodes(ts.createSourceFile(entryPath, code, ts.ScriptTarget.Latest, true));
-    for (const rootTypeNode of rootTypeNodes) {
-        resolveTypeNode(rootTypeNode, entry);
+    const rootTypeNodes: RootTypeNode[] = collectCallRootTypeNodes(ts.createSourceFile(entryPath, code, ts.ScriptTarget.Latest, true))
+        .map(typeNode => ({ typeNode, from: entry }));
+    const entrySourceFile = ts.createSourceFile(entryPath, code, ts.ScriptTarget.Latest, true);
+    const wrapperBindings = collectWrapperBindings(entry, entrySourceFile);
+
+    ts.forEachChild(entrySourceFile, function visit(node) {
+        if (
+            ts.isCallExpression(node) &&
+            node.typeArguments?.length &&
+            getCallableName(node.expression) &&
+            (
+                wrapperBindings.has(getCallableName(node.expression)!) ||
+                (
+                    ts.isPropertyAccessExpression(node.expression) &&
+                    ts.isIdentifier(node.expression.expression) &&
+                    importedObjectWrapperMembers.get(node.expression.expression.text)?.has(node.expression.name.text)
+                )
+            )
+        ) {
+            const binding = wrapperBindings.get(getCallableName(node.expression)!) ?? (
+                ts.isPropertyAccessExpression(node.expression) && ts.isIdentifier(node.expression.expression)
+                    ? importedObjectWrapperMembers.get(node.expression.expression.text)?.get(node.expression.name.text)
+                    : undefined
+            );
+            if (!binding) return;
+            const typeArg = instantiateWrapperTypePattern(binding, node.typeArguments, entrySourceFile);
+            if (typeArg) rootTypeNodes.push({
+                typeNode: typeArg,
+                from: binding.typePattern && binding.sourceFilePath ? getEntry(binding.sourceFilePath) : entry,
+            });
+            if (binding.typePattern) {
+                for (const callerTypeArg of node.typeArguments) {
+                    rootTypeNodes.push({ typeNode: callerTypeArg, from: entry });
+                }
+            }
+        }
+
+        ts.forEachChild(node, visit);
+    });
+
+    for (const root of rootTypeNodes) {
+        resolveTypeNode(root.typeNode, root.from);
     }
 
-    return { concrete: [...concrete.values()], templates };
+    return { concrete: [...concrete.values()], templates, wrapperBindings };
 }

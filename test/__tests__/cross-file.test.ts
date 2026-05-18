@@ -108,6 +108,105 @@ describe('cross-file import resolution', () => {
         expect(result.value).toBe('hello');
     });
 
+    it('resolves generic type passed through imported wrapper functions', () => {
+        const { code, path } = loadCross('wrapper-consumer.ts');
+        const cache = new Map<string, ParsedFileEntry>();
+        const imported = resolveImports(code, path, cache);
+
+        expect(imported.templates.has('Wrapper')).toBe(true);
+
+        const { registry, callSites, sourceFile } = analyze(code, path, imported);
+        const used = selectUsedRegistry(registry, callSites, sourceFile);
+
+        expect(used.registry.has('Wrapper__string')).toBe(true);
+        expect(used.callSites).toHaveLength(2);
+        expect(used.callSites[0].fnName).toBe('protobuf_encode');
+        expect(used.callSites[1].fnName).toBe('protobuf_decode');
+
+        const { transformedCode, hasReplacements } = applyReplacements(code, sourceFile, callSites, used.registry);
+        expect(hasReplacements).toBe(true);
+        expect(transformedCode).toContain('protobuf_encode_Wrapper__string(');
+        expect(transformedCode).toContain('protobuf_decode_Wrapper__string(');
+    });
+
+    it('handles wrapper aliases, arrows, nested generics, and non-first generic forwarding', () => {
+        const { code, path } = loadCross('wrapper-edge-consumer.ts');
+        const cache = new Map<string, ParsedFileEntry>();
+        const imported = resolveImports(code, path, cache);
+
+        const { registry, callSites, sourceFile } = analyze(code, path, imported);
+        const used = selectUsedRegistry(registry, callSites, sourceFile);
+
+        expect(used.registry.has('Wrapper__string')).toBe(true);
+        expect(used.registry.has('Wrapper__Wrapper__string')).toBe(true);
+        expect(used.callSites).toHaveLength(5);
+
+        const { transformedCode, hasReplacements } = applyReplacements(code, sourceFile, callSites, used.registry);
+        expect(hasReplacements).toBe(true);
+        expect(transformedCode).toContain('protobuf_encode_Wrapper__string(');
+        expect(transformedCode).toContain('protobuf_decode_Wrapper__string(');
+        expect(transformedCode).toContain('protobuf_encode_Wrapper__Wrapper__string(');
+        expect(transformedCode).toContain('protobuf_decode_Wrapper__Wrapper__string(');
+        expect(transformedCode).toContain('passthroughOnly<Wrapper<string>>');
+    });
+
+    it('handles local wrapper functions in the entry file', () => {
+        const { code, path } = loadCross('local-wrapper-consumer.ts');
+        const cache = new Map<string, ParsedFileEntry>();
+        const imported = resolveImports(code, path, cache);
+
+        const { registry, callSites, sourceFile } = analyze(code, path, imported);
+        const used = selectUsedRegistry(registry, callSites, sourceFile);
+
+        expect(used.registry.has('Wrapper__string')).toBe(true);
+        expect(used.callSites).toHaveLength(2);
+
+        const { transformedCode, hasReplacements } = applyReplacements(code, sourceFile, callSites, used.registry);
+        expect(hasReplacements).toBe(true);
+        expect(transformedCode).toContain('protobuf_encode_Wrapper__string(');
+        expect(transformedCode).toContain('protobuf_decode_Wrapper__string(');
+    });
+
+    it('handles complex wrapper objects, branches, nested helpers, and chains', () => {
+        const { code, path } = loadCross('wrapper-complex-consumer.ts');
+        const cache = new Map<string, ParsedFileEntry>();
+        const imported = resolveImports(code, path, cache);
+
+        const { registry, callSites, sourceFile } = analyze(code, path, imported);
+        const used = selectUsedRegistry(registry, callSites, sourceFile);
+
+        expect(used.registry.has('Wrapper__string')).toBe(true);
+        expect(used.registry.has('Wrapper__Wrapper__string')).toBe(true);
+        expect(used.callSites).toHaveLength(7);
+
+        const { transformedCode, hasReplacements } = applyReplacements(code, sourceFile, callSites, used.registry);
+        expect(hasReplacements).toBe(true);
+        expect(transformedCode).toContain('protobuf_encode_Wrapper__string(');
+        expect(transformedCode).toContain('protobuf_decode_Wrapper__string(');
+        expect(transformedCode).toContain('protobuf_encode_Wrapper__Wrapper__string(');
+        expect(transformedCode).not.toContain('encodeChained<Wrapper<string>>');
+    });
+
+    it('handles wrapper protobuf type derived from another generic type', () => {
+        const { code, path } = loadCross('wrapper-type-source-consumer.ts');
+        const cache = new Map<string, ParsedFileEntry>();
+        const imported = resolveImports(code, path, cache);
+
+        const { registry, callSites, sourceFile } = analyze(code, path, imported);
+        const used = selectUsedRegistry(registry, callSites, sourceFile);
+
+        expect(used.registry.has('Wrapper__string')).toBe(true);
+        expect(used.registry.has('Wrapper__Wrapper__string')).toBe(true);
+        expect(used.callSites).toHaveLength(5);
+
+        const { transformedCode, hasReplacements } = applyReplacements(code, sourceFile, callSites, used.registry);
+        expect(hasReplacements).toBe(true);
+        expect(transformedCode).toContain('protobuf_encode_Wrapper__string(');
+        expect(transformedCode).toContain('protobuf_decode_Wrapper__string(');
+        expect(transformedCode).toContain('protobuf_encode_Wrapper__Wrapper__string(');
+        expect(transformedCode).not.toContain('encodeBoxed<string>');
+    });
+
     // ── Transitive imports ───────────────────────────────────────────
 
     it('resolves transitive imports (A → B → C)', () => {

@@ -3,7 +3,7 @@ import { WireType, PRIMITIVE_TYPE_MAP, type ProtobufMessage, type MessageRegistr
 import { collectInterface, collectGenericInterface } from './collector.js';
 import { monomorphizeTypeNode } from './monomorphizer.js';
 import { createImportedTypeNameResolver, typeNodeToMangledName } from './utils.js';
-import type { ImportedDefinitions } from './import-resolver.js';
+import type { ImportedDefinitions, WrapperBinding } from './import-resolver.js';
 import {
   collectProtobufImportBindings,
   matchProtobufCallSite,
@@ -12,6 +12,35 @@ import {
 import { buildDependencyRegistry } from './dependency-graph.js';
 
 export { typeNodeToMangledName } from './utils.js';
+
+const syntheticTypeSourceFiles = new WeakMap<ts.TypeNode, ts.SourceFile>();
+
+function getCallableName(expr: ts.Expression): string | null {
+  if (ts.isIdentifier(expr)) return expr.text;
+  if (ts.isPropertyAccessExpression(expr)) return expr.name.text;
+  return null;
+}
+
+function instantiateWrapperTypePattern(
+  binding: WrapperBinding,
+  callerTypeArgs: ts.NodeArray<ts.TypeNode>,
+  sf: ts.SourceFile,
+): ts.TypeNode | null {
+  if (!binding.typePattern || !binding.typeParamNames?.length) return callerTypeArgs[binding.typeArgIndex] ?? null;
+
+  let text = binding.typePattern;
+  for (let i = 0; i < binding.typeParamNames.length; i++) {
+    const arg = callerTypeArgs[i];
+    if (!arg) return null;
+    text = text.replace(new RegExp(`\\b${binding.typeParamNames[i]}\\b`, 'g'), arg.getText(sf));
+  }
+
+  const parsed = ts.createSourceFile('wrapper-type.ts', `type __T = ${text};`, ts.ScriptTarget.Latest, true);
+  const stmt = parsed.statements[0];
+  if (!ts.isTypeAliasDeclaration(stmt)) return null;
+  syntheticTypeSourceFiles.set(stmt.type, ts.createSourceFile(binding.sourceFilePath ?? sf.fileName, '', ts.ScriptTarget.Latest, true));
+  return stmt.type;
+}
 
 /** A recorded call-site for later replacement. */
 export interface CallSiteRecord {
@@ -57,6 +86,7 @@ export function analyze(code: string, filePath: string, imported?: ImportedDefin
   const deferredTypeArgs: ts.TypeNode[] = [];
   const importBindings = collectProtobufImportBindings(sf);
   const resolveImportedTypeName = createImportedTypeNameResolver(sf);
+  const wrapperBindings = imported?.wrapperBindings ?? new Map<string, WrapperBinding>();
 
   // Seed with imported definitions
   if (imported) {
@@ -83,6 +113,28 @@ export function analyze(code: string, filePath: string, imported?: ImportedDefin
       if (cs) {
         deferredTypeArgs.push(cs.firstTypeArg);
         callSites.push(cs);
+      } else if (
+        node.typeArguments?.length &&
+        getCallableName(node.expression) &&
+        wrapperBindings.has(getCallableName(node.expression)!)
+      ) {
+        const binding = wrapperBindings.get(getCallableName(node.expression)!)!;
+        const firstTypeArg = instantiateWrapperTypePattern(binding, node.typeArguments, sf);
+        if (!firstTypeArg) {
+          ts.forEachChild(node, visit);
+          return;
+        }
+        const exprStart = node.expression.getStart(sf);
+        const lc = sf.getLineAndCharacterOfPosition(exprStart);
+        deferredTypeArgs.push(firstTypeArg);
+        callSites.push({
+          fnName: binding.fnName,
+          exprStart,
+          typeArgsEnd: node.typeArguments.end + 1,
+          firstTypeArg,
+          line: lc.line + 1,
+          column: lc.character + 1,
+        });
       }
     }
 
@@ -91,7 +143,9 @@ export function analyze(code: string, filePath: string, imported?: ImportedDefin
 
   // ── post-walk: monomorphize deferred type args ──────────────────────
   for (const typeArg of deferredTypeArgs) {
-    monomorphizeTypeNode(typeArg, sf, templates, mono, resolveImportedTypeName);
+    const typeSf = syntheticTypeSourceFiles.get(typeArg) ?? sf;
+    const typeResolver = createImportedTypeNameResolver(typeSf);
+    monomorphizeTypeNode(typeArg, typeSf, templates, mono, typeResolver);
   }
   for (const m of mono.values()) concrete.push(m);
 
@@ -130,7 +184,8 @@ export function selectUsedRegistry(
   const resolveImportedTypeName = createImportedTypeNameResolver(sourceFile);
 
   for (const cs of callSites) {
-    const typeName = typeNodeToMangledName(cs.firstTypeArg, sourceFile, resolveImportedTypeName);
+    const typeSf = syntheticTypeSourceFiles.get(cs.firstTypeArg) ?? sourceFile;
+    const typeName = typeNodeToMangledName(cs.firstTypeArg, typeSf, createImportedTypeNameResolver(typeSf));
     if (!registry.has(typeName)) continue;
     roots.add(typeName);
     resolved.push({ ...cs, typeName });
