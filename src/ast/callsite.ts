@@ -4,9 +4,7 @@ export type CanonicalProtobufFn = 'protobuf_encode' | 'protobuf_decode';
 
 const CANONICAL = new Set<CanonicalProtobufFn>(['protobuf_encode', 'protobuf_decode']);
 const PROTOBUF_RUNTIME_MODULES = new Set([
-  'protobuf-fastdsl',
-  'protobuf-fastdsl/runtime',
-  'protobuf-fastdsl/runtime.js',
+  '@snowluma/proton',
 ]);
 
 export interface ProtobufImportBindings {

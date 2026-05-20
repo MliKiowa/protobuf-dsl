@@ -24,7 +24,7 @@ export default function protobufVitePlugin(options: ProtobufVitePluginOptions = 
   const fileCache = new Map<string, ParsedFileEntry>();
   const runtimeMapByFile = new Map<string, RuntimeMapFileEntry>();
   const runtimeMapEnabled = options.runtimeMap?.enabled === true;
-  const runtimeMapFileName = options.runtimeMap?.fileName ?? 'protobuf-fastdsl.runtime-map.json';
+  const runtimeMapFileName = options.runtimeMap?.fileName ?? 'snowluma-proton.runtime-map.json';
 
   return {
     name: 'vite-plugin-protobuf',

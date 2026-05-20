@@ -19,6 +19,7 @@ export interface ParsedFileEntry {
     concrete: ProtobufMessage[];
     templates: Map<string, GenericProtobufTemplate>;
     importedTypeSources: Map<string, string>;
+    exportAllTypeSources: Map<string, string>;
     resolveImportedTypeName: ImportedTypeNameResolver;
     exportedWrappers: Map<string, WrapperBinding>;
 }
@@ -60,6 +61,43 @@ function extractImports(sf: ts.SourceFile): ImportClause[] {
                 });
             }
         }
+    }
+    return result;
+}
+
+/** Like `extractImports`, but skips `import type { ... }` and `import { type X }`
+ *  entries. Wrapper functions are values, so type-only imports can't introduce
+ *  one and we shouldn't eagerly parse their source files just to look for wrappers. */
+function extractValueImports(sf: ts.SourceFile): ImportClause[] {
+    const result: ImportClause[] = [];
+    for (const stmt of sf.statements) {
+        if (!ts.isImportDeclaration(stmt) || !stmt.importClause) continue;
+        if (stmt.importClause.isTypeOnly) continue;
+        const spec = stmt.moduleSpecifier;
+        if (!ts.isStringLiteral(spec)) continue;
+        const specifier = spec.text;
+
+        const clause = stmt.importClause;
+        if (clause.namedBindings && ts.isNamedImports(clause.namedBindings)) {
+            for (const el of clause.namedBindings.elements) {
+                if (el.isTypeOnly) continue;
+                result.push({
+                    importedName: (el.propertyName ?? el.name).text,
+                    localName: el.name.text,
+                    specifier,
+                });
+            }
+        }
+    }
+    return result;
+}
+
+function extractExportAllSpecifiers(sf: ts.SourceFile): string[] {
+    const result: string[] = [];
+    for (const stmt of sf.statements) {
+        if (!ts.isExportDeclaration(stmt) || stmt.exportClause) continue;
+        const spec = stmt.moduleSpecifier;
+        if (spec && ts.isStringLiteral(spec)) result.push(spec.text);
     }
     return result;
 }
@@ -192,7 +230,8 @@ function matchForwardedKnownWrapper(
     knownWrappers: Map<string, WrapperBinding>,
 ): WrapperBinding | null {
     if (!body || !typeParams?.length) return null;
-    const typeParamIndexes = new Map(typeParams.map((p, index) => [p.name.text, index]));
+    const tps = typeParams; // narrowed copy for closure scope
+    const typeParamIndexes = new Map(tps.map((p, index) => [p.name.text, index]));
     let found: WrapperBinding | null = null;
 
     function visit(node: ts.Node): void {
@@ -209,10 +248,25 @@ function matchForwardedKnownWrapper(
                 !forwardedTypeArg.typeArguments?.length &&
                 typeParamIndexes.has(forwardedTypeArg.typeName.text)
             ) {
-                found = {
+                const chainTypeArgIndex = typeParamIndexes.get(forwardedTypeArg.typeName.text)!;
+                const binding: WrapperBinding = {
                     fnName: wrapper.fnName,
-                    typeArgIndex: typeParamIndexes.get(forwardedTypeArg.typeName.text)!,
+                    typeArgIndex: chainTypeArgIndex,
                 };
+                // Propagate the typePattern from the inner wrapper, substituting
+                // its type-param names with the chain's own. Otherwise the chain
+                // would treat its own `<X>` as the encoded type rather than the
+                // wrapped form (e.g. `Wrapper<X>`).
+                if (wrapper.typePattern && wrapper.typeParamNames?.length === 1) {
+                    const chainParamName = tps[chainTypeArgIndex].name.text;
+                    const wrapperParamName = wrapper.typeParamNames[0];
+                    binding.typePattern = wrapperParamName === chainParamName
+                        ? wrapper.typePattern
+                        : wrapper.typePattern.replace(new RegExp(`\\b${wrapperParamName}\\b`, 'g'), chainParamName);
+                    binding.typeParamNames = [chainParamName];
+                    binding.sourceFilePath = wrapper.sourceFilePath;
+                }
+                found = binding;
                 return;
             }
         }
@@ -268,7 +322,11 @@ function collectWrapperCandidates(
     return candidates;
 }
 
-function collectWrappers(sf: ts.SourceFile, exportedOnly: boolean): Map<string, WrapperBinding> {
+function collectWrappers(
+    sf: ts.SourceFile,
+    exportedOnly: boolean,
+    externalKnownWrappers: Map<string, WrapperBinding> = new Map(),
+): Map<string, WrapperBinding> {
     const wrappers = new Map<string, WrapperBinding>();
     const localWrapperMembers = new Map<string, Map<string, WrapperBinding>>();
     const candidates = collectWrapperCandidates(sf, exportedOnly);
@@ -278,9 +336,17 @@ function collectWrappers(sf: ts.SourceFile, exportedOnly: boolean): Map<string, 
         if (fn) wrappers.set(candidate.name, fn);
     }
 
+    // Detect both intra-file forwarders (`encodeFoo<T>(v) { return encodeBar<T>(v); }`
+    // where `encodeBar` is local) AND cross-file forwarders to wrappers imported
+    // from already-parsed modules. Externally known wrappers are seeded by the
+    // caller (`parseFileForDefinitions`) after it resolves imports.
+    const knownForForwarding = new Map<string, WrapperBinding>();
+    for (const [k, v] of externalKnownWrappers) knownForForwarding.set(k, v);
+    for (const [k, v] of wrappers) knownForForwarding.set(k, v);
+
     for (const candidate of candidates) {
         if (wrappers.has(candidate.name)) continue;
-        const fn = matchForwardedKnownWrapper(candidate.body, candidate.typeParameters, wrappers);
+        const fn = matchForwardedKnownWrapper(candidate.body, candidate.typeParameters, knownForForwarding);
         if (fn) wrappers.set(candidate.name, fn);
     }
 
@@ -319,25 +385,86 @@ function collectWrappers(sf: ts.SourceFile, exportedOnly: boolean): Map<string, 
     return wrappers;
 }
 
-function collectExportedWrappers(sf: ts.SourceFile): Map<string, WrapperBinding> {
-    return collectWrappers(sf, true);
+function collectExportedWrappers(
+    sf: ts.SourceFile,
+    externalKnownWrappers: Map<string, WrapperBinding> = new Map(),
+): Map<string, WrapperBinding> {
+    return collectWrappers(sf, true, externalKnownWrappers);
 }
 
-/** Parse a file and extract its protobuf interfaces and generic templates. */
-function parseFileForDefinitions(absolutePath: string, code?: string): ParsedFileEntry {
+/**
+ * Parse a file and extract its protobuf interfaces and generic templates.
+ *
+ * When `cache` is provided, this resolves the file's imports recursively
+ * (with cycle protection) so cross-file forwarded wrappers — e.g.
+ * `export function encodeChain<T>(v) { return encodeBase<T>(v); }`
+ * where `encodeBase` is imported from another module — can be detected.
+ */
+function parseFileForDefinitions(
+    absolutePath: string,
+    code?: string,
+    cache?: Map<string, ParsedFileEntry>,
+    parsing?: Set<string>,
+): ParsedFileEntry {
     const sourceText = code ?? readFileSync(absolutePath, 'utf-8');
     const sf = ts.createSourceFile(absolutePath, sourceText, ts.ScriptTarget.Latest, true);
     const concrete: ProtobufMessage[] = [];
     const templates = new Map<string, GenericProtobufTemplate>();
     const resolveImportedTypeName = createImportedTypeNameResolver(sf);
     const importedTypeSources = new Map<string, string>();
-    const exportedWrappers = collectExportedWrappers(sf);
+    const exportAllTypeSources = new Map<string, string>();
+
+    // Collect imported wrapper bindings under their LOCAL names so this file's
+    // forwarders can match against them. Skip work entirely if there's no cache
+    // (legacy callers that don't care about cross-file forwarding).
+    //
+    // Only descends into value imports (not `import type { ... }`), since
+    // type-only imports can never introduce a wrapper function. This avoids
+    // pulling unrelated type-only modules into the cache.
+    const importedKnownWrappers = new Map<string, WrapperBinding>();
+    if (cache) {
+        const inProgress = parsing ?? new Set<string>();
+        inProgress.add(absolutePath);
+        for (const imp of extractValueImports(sf)) {
+            const resolved = resolveModulePath(imp.specifier, absolutePath);
+            if (!resolved) continue;
+            if (inProgress.has(resolved)) continue; // cycle guard
+            let entry = cache.get(resolved);
+            if (!entry) {
+                entry = parseFileForDefinitions(resolved, undefined, cache, inProgress);
+                cache.set(resolved, entry);
+            }
+            const wrapperFn = entry.exportedWrappers.get(imp.importedName);
+            if (wrapperFn) importedKnownWrappers.set(imp.localName, wrapperFn);
+        }
+        inProgress.delete(absolutePath);
+    }
+
+    const exportedWrappers = collectExportedWrappers(sf, importedKnownWrappers);
 
     for (const imp of extractImports(sf)) {
         const resolved = resolveModulePath(imp.specifier, absolutePath);
         if (!resolved) continue;
         importedTypeSources.set(imp.importedName, resolved);
         importedTypeSources.set(imp.localName, resolved);
+    }
+
+    if (cache) {
+        const inProgress = parsing ?? new Set<string>();
+        inProgress.add(absolutePath);
+        for (const specifier of extractExportAllSpecifiers(sf)) {
+            const resolved = resolveModulePath(specifier, absolutePath);
+            if (!resolved || inProgress.has(resolved)) continue;
+            let entry = cache.get(resolved);
+            if (!entry) {
+                entry = parseFileForDefinitions(resolved, undefined, cache, inProgress);
+                cache.set(resolved, entry);
+            }
+            for (const msg of entry.concrete) exportAllTypeSources.set(msg.name, resolved);
+            for (const name of entry.templates.keys()) exportAllTypeSources.set(name, resolved);
+            for (const [name, source] of entry.exportAllTypeSources) exportAllTypeSources.set(name, source);
+        }
+        inProgress.delete(absolutePath);
     }
 
     for (const stmt of sf.statements) {
@@ -356,6 +483,7 @@ function parseFileForDefinitions(absolutePath: string, code?: string): ParsedFil
         concrete,
         templates,
         importedTypeSources,
+        exportAllTypeSources,
         resolveImportedTypeName,
         exportedWrappers,
     };
@@ -393,7 +521,7 @@ export function resolveImports(
     cache: Map<string, ParsedFileEntry>,
 ): ImportedDefinitions {
     const entryPath = resolve(importerPath);
-    const entry = parseFileForDefinitions(entryPath, code);
+    const entry = parseFileForDefinitions(entryPath, code, cache);
     const concrete = new Map<string, ProtobufMessage>();
     const templates = new Map<string, GenericProtobufTemplate>();
     const fileEntries = new Map<string, ParsedFileEntry>([[entryPath, entry]]);
@@ -408,7 +536,7 @@ export function resolveImports(
 
         let parsed = cache.get(abs);
         if (!parsed) {
-            parsed = parseFileForDefinitions(abs);
+            parsed = parseFileForDefinitions(abs, undefined, cache);
             cache.set(abs, parsed);
         }
 
@@ -495,7 +623,7 @@ export function resolveImports(
             return;
         }
 
-        const importedPath = from.importedTypeSources.get(typeName);
+        const importedPath = from.importedTypeSources.get(typeName) ?? from.exportAllTypeSources.get(typeName);
         if (!importedPath) return;
 
         resolveTypeName(typeName, getEntry(importedPath));

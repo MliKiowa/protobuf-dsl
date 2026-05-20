@@ -34,6 +34,17 @@ export interface GenericFieldTemplate {
   isTypeParam: boolean;
   isOptional: boolean;
   isRepeated: boolean;
+  /**
+   * For fields whose type-arg is itself a generic instantiation
+   * (e.g. `wrapped: pb<5, Wrapper<U>>` where `U` is a template type
+   * parameter), the original type-arg source text. At monomorphization
+   * time the substituted text is re-parsed and re-instantiated so
+   * `Wrapper<uint_32>` ends up in the registry under its mangled name.
+   */
+  genericTypeArgText?: string;
+  /** Source-file path captured alongside `genericTypeArgText`, used as
+   *  the synthetic file name when re-parsing the substituted text. */
+  genericTypeArgSourceFilePath?: string;
 }
 
 export type MessageRegistry = Map<string, ProtobufMessage>;

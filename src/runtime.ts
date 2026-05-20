@@ -29,7 +29,7 @@ interface StackFrame {
     column: number;
 }
 
-const DYNAMIC_MISS = Symbol('protobuf-fastdsl-dynamic-miss');
+const DYNAMIC_MISS = Symbol('snowluma-proton-dynamic-miss');
 
 let runtimeMapFallback: ProtobufRuntimeMap | null = null;
 let runtimeMapRegistry: MessageRegistry | null = null;
@@ -63,7 +63,7 @@ export function protobuf_encode<T>(_params: T): Uint8Array {
     if (dynamic !== DYNAMIC_MISS) return dynamic as Uint8Array;
 
     throw new Error(
-        'protobuf_encode<T>() was not transformed by the protobuf-fastdsl Vite plugin. ' +
+        'protobuf_encode<T>() was not transformed by the @snowluma/proton Vite plugin. ' +
         'Make sure protobufVitePlugin() is added to your vite.config.ts plugins array.',
     );
 }
@@ -73,7 +73,7 @@ export function protobuf_decode<T>(_data: Uint8Array): T {
     if (dynamic !== DYNAMIC_MISS) return dynamic as T;
 
     throw new Error(
-        'protobuf_decode<T>() was not transformed by the protobuf-fastdsl Vite plugin. ' +
+        'protobuf_decode<T>() was not transformed by the @snowluma/proton Vite plugin. ' +
         'Make sure protobufVitePlugin() is added to your vite.config.ts plugins array.',
     );
 }
